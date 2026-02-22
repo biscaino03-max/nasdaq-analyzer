@@ -84,75 +84,87 @@ def _first_not_none(*vals):
     return None
 
 
-# ----------------- FINNHUB FALLBACK -----------------
-def finnhub_price_targets(symbol: str):
-    """
-    Finnhub Price Target endpoint:
-    https://finnhub.io/docs/api/price-target  [oai_citation:3‡Finnhub](https://finnhub.io/docs/api/price-target?utm_source=chatgpt.com)
-    Retorna dict normalmente com low / mean / high (pode variar).
-    """
-    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
-    if not api_key:
-        return None
+# ----------------- FINNHUB -----------------
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
-    url = "https://finnhub.io/api/v1/stock/price-target"
+
+def finnhub_get(url: str, params: dict):
+    """Centraliza request + retorno de diagnóstico."""
+    if not FINNHUB_API_KEY:
+        return None, {"ok": False, "reason": "FINNHUB_API_KEY vazia/não configurada"}
+
     try:
-        r = requests.get(url, params={"symbol": symbol, "token": api_key}, timeout=10)
+        r = requests.get(url, params={**params, "token": FINNHUB_API_KEY}, timeout=12)
+        diag = {"ok": r.status_code == 200, "status": r.status_code, "text": r.text[:500]}
         if r.status_code != 200:
-            return None
+            return None, diag
         data = r.json()
-        if not isinstance(data, dict):
-            return None
-        return data
-    except Exception:
-        return None
+        diag["json_preview"] = str(data)[:500]
+        return data, diag
+    except Exception as e:
+        return None, {"ok": False, "reason": f"Exception: {e}"}
+
+
+def finnhub_price_targets(symbol: str):
+    # https://finnhub.io/api/v1/stock/price-target
+    data, diag = finnhub_get(
+        "https://finnhub.io/api/v1/stock/price-target",
+        {"symbol": symbol},
+    )
+    return data, diag
 
 
 def finnhub_recommendation_key(symbol: str):
-    """
-    Finnhub Recommendation Trends endpoint:
-    https://finnhub.io/docs/api/recommendation-trends  [oai_citation:4‡Finnhub](https://finnhub.io/docs/api/recommendation-trends?utm_source=chatgpt.com)
-    Retorna lista por período. Usamos o item mais recente.
-    Convertendo para recommendationKey estilo Yahoo (aproximação).
-    """
-    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
-    if not api_key:
-        return None
+    # https://finnhub.io/api/v1/stock/recommendation
+    arr, diag = finnhub_get(
+        "https://finnhub.io/api/v1/stock/recommendation",
+        {"symbol": symbol},
+    )
+    if not isinstance(arr, list) or not arr:
+        return None, diag
 
-    url = "https://finnhub.io/api/v1/stock/recommendation"
-    try:
-        r = requests.get(url, params={"symbol": symbol, "token": api_key}, timeout=10)
-        if r.status_code != 200:
-            return None
-        arr = r.json()
-        if not isinstance(arr, list) or not arr:
-            return None
+    latest = arr[0]
+    if not isinstance(latest, dict):
+        return None, diag
 
-        latest = arr[0]  # normalmente já vem ordenado por data desc
-        if not isinstance(latest, dict):
-            return None
+    buy = (latest.get("buy") or 0)
+    strong_buy = (latest.get("strongBuy") or 0)
+    hold = (latest.get("hold") or 0)
+    sell = (latest.get("sell") or 0)
+    strong_sell = (latest.get("strongSell") or 0)
 
-        buy = (latest.get("buy") or 0)
-        strong_buy = (latest.get("strongBuy") or 0)
-        hold = (latest.get("hold") or 0)
-        sell = (latest.get("sell") or 0)
-        strong_sell = (latest.get("strongSell") or 0)
+    if strong_buy >= max(buy, hold, sell, strong_sell) and strong_buy > 0:
+        return "strong_buy", diag
+    if buy >= max(hold, sell, strong_sell) and buy > 0:
+        return "buy", diag
+    if hold >= max(sell, strong_sell) and hold > 0:
+        return "hold", diag
+    if strong_sell >= max(sell, 0) and strong_sell > 0:
+        return "strong_sell", diag
+    if sell > 0:
+        return "sell", diag
 
-        # Heurística simples para virar "recommendationKey"
-        if strong_buy >= max(buy, hold, sell, strong_sell) and strong_buy > 0:
-            return "strong_buy"
-        if buy >= max(hold, sell, strong_sell) and buy > 0:
-            return "buy"
-        if hold >= max(sell, strong_sell) and hold > 0:
-            return "hold"
-        if strong_sell >= max(sell, 0) and strong_sell > 0:
-            return "strong_sell"
-        if sell > 0:
-            return "sell"
+    return None, diag
 
-        return None
-    except Exception:
-        return None
+
+# ----------------- SIDEBAR DIAGNOSTIC -----------------
+with st.sidebar:
+    st.header("Diagnóstico")
+    st.write("Finnhub key detectada:", "✅" if FINNHUB_API_KEY else "❌")
+    if FINNHUB_API_KEY:
+        st.caption("A chave não é mostrada por segurança.")
+    test_symbol = st.text_input("Testar Finnhub com ticker", value="NVDA")
+    if st.button("Rodar teste Finnhub"):
+        pt, diag_pt = finnhub_price_targets(normalize_ticker(test_symbol))
+        st.subheader("Price Target")
+        st.json(diag_pt)
+        st.subheader("Payload (preview)")
+        st.write(pt)
+
+        rk, diag_rk = finnhub_recommendation_key(normalize_ticker(test_symbol))
+        st.subheader("Recommendation")
+        st.json(diag_rk)
+        st.write("recommendationKey:", rk)
 
 
 # ----------------- CACHE (TTL 5min) -----------------
@@ -180,14 +192,14 @@ def fetch_one(ticker: str):
         "1Y": pct_change(closes, WINDOWS["1Y"]),
         "Analistas_key": None,
         "Analistas": "—",
-        "Preço": last_close,  # preço entre Analistas e Target Min
+        "Preço": last_close,
         "Target Min": None,
         "Target Médio": None,
         "Target Máx": None,
         "Erro": "",
     }
 
-    # 1) Yahoo via yfinance tk.info
+    # 1) Yahoo via tk.info
     info = {}
     try:
         info = tk.info or {}
@@ -202,26 +214,21 @@ def fetch_one(ticker: str):
     row["Target Médio"] = _to_float(info.get("targetMeanPrice"))
     row["Target Máx"] = _to_float(info.get("targetHighPrice"))
 
-    # 2) Se targets vierem vazios, tenta Finnhub Price Target
+    # 2) Finnhub fallback
     if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
-        fh = finnhub_price_targets(ticker)
-        if isinstance(fh, dict):
-            # Finnhub costuma usar low/mean/high
-            row["Target Min"] = _first_not_none(row["Target Min"], fh.get("low"), fh.get("targetLowPrice"))
-            row["Target Médio"] = _first_not_none(row["Target Médio"], fh.get("mean"), fh.get("targetMeanPrice"))
-            row["Target Máx"] = _first_not_none(row["Target Máx"], fh.get("high"), fh.get("targetHighPrice"))
+        pt, _diag = finnhub_price_targets(ticker)
+        if isinstance(pt, dict):
+            row["Target Min"] = _first_not_none(pt.get("low"), pt.get("targetLowPrice"))
+            row["Target Médio"] = _first_not_none(pt.get("mean"), pt.get("targetMeanPrice"))
+            row["Target Máx"] = _first_not_none(pt.get("high"), pt.get("targetHighPrice"))
 
-            if row["Target Min"] is not None or row["Target Médio"] is not None or row["Target Máx"] is not None:
-                # se o Yahoo não tinha rec, tenta pegar recomendação pela Finnhub
-                if not row["Analistas_key"]:
-                    rec2 = finnhub_recommendation_key(ticker)
-                    row["Analistas_key"] = rec2
-                    row["Analistas"] = pretty_analyst_label(rec2)
+        if not row["Analistas_key"]:
+            rk, _diag2 = finnhub_recommendation_key(ticker)
+            row["Analistas_key"] = rk
+            row["Analistas"] = pretty_analyst_label(rk)
 
-        if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
-            if row["Erro"]:
-                row["Erro"] += " | "
-            row["Erro"] += "Sem targets (Yahoo/Finnhub)"
+    if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
+        row["Erro"] = "Sem targets (Yahoo/Finnhub)"
 
     return row
 
@@ -306,7 +313,6 @@ def show_strong_buy_top5(df_raw: pd.DataFrame):
         st.write("Nenhuma ação marcada como 🟢 Compra forte no momento.")
         return
 
-    # Ordena por 1Y (fallback 6M, depois 3M)
     def score_row(r):
         for m in ["1Y", "6M", "3M"]:
             v = r.get(m)
@@ -351,6 +357,9 @@ def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
     ]
     df = df[[c for c in final_cols if c in df.columns]]
 
+    # *** IMPORTANTE: trocar None por vazio ANTES do styler ***
+    df = df.where(pd.notnull(df), "")
+
     styler = df.style
 
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
@@ -368,21 +377,20 @@ def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
                     axis=1
                 )
 
-    # Formatação: nunca mostrar "None" — mostra vazio
     fmt = {}
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
         if c in df.columns:
-            fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{x*100:.2f}%"
+            fmt[c] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x)*100:.2f}%"
     if "Preço" in df.columns:
-        fmt["Preço"] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+        fmt["Preço"] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x):.2f}"
     for c in ["Target Min", "Target Médio", "Target Máx"]:
         if c in df.columns:
-            fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+            fmt[c] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x):.2f}"
 
     styler = styler.format(fmt)
 
     st.dataframe(styler, use_container_width=True)
-    st.caption("Dados ao vivo via Yahoo (yfinance) + fallback Finnhub. Atualização automática a cada 5 min + botão manual.")
+    st.caption("Dados via Yahoo (yfinance) + fallback Finnhub. Atualização automática a cada 5 min + botão manual.")
 
 
 def ticker_manager(title: str, key_state: str, default_list: list[str]):
@@ -423,10 +431,6 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
 
         st.caption(f"Atualização automática: a cada {TTL_SECONDS//60} min.")
 
-        # Aviso se Finnhub não estiver configurado
-        if not os.getenv("FINNHUB_API_KEY"):
-            st.warning("FINNHUB_API_KEY não configurada. O fallback Finnhub não será usado.")
-
     with right:
         st.markdown("**Tickers atuais**")
         if not tickers:
@@ -459,6 +463,9 @@ tab1, tab2 = st.tabs(["Investidos", "Em análise"])
 
 with tab1:
     ticker_manager("Investidos (editável)", "tickers_investidos", INVESTIDOS_DEFAULT)
+
+with tab2:
+    ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
 
 with tab2:
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
