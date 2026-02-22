@@ -19,13 +19,19 @@ WINDOWS = {
     "1Y":252
 }
 
+ANALYST_LABELS = {
+    "strong_buy": "🟢 Compra forte",
+    "buy": "🔵 Compra",
+    "hold": "🟡 Manter",
+    "sell": "🔴 Venda",
+    "strong_sell": "🟥 Venda forte",
+    None: "—",
+    "none": "—",
+}
+
 TTL_SECONDS = 300
 
-st.set_page_config(
-    page_title="Nasdaq Analyzer",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Nasdaq Analyzer",layout="wide")
 st.title("Nasdaq Analyzer (ao vivo)")
 
 
@@ -42,13 +48,9 @@ if "tickers_em_analise" not in st.session_state:
 # ---------- HELPERS ----------
 
 def normalize_ticker(t):
-
     t=(t or "").upper().strip()
-
     t=re.sub(r"[^A-Z0-9\.\-]","",t)
-
     return t
-
 
 
 def pct_change(closes,n):
@@ -57,6 +59,14 @@ def pct_change(closes,n):
         return None
 
     return float((closes.iloc[-1]/closes.iloc[-1-n])-1)
+
+
+def pretty_label(key):
+
+    if key in ANALYST_LABELS:
+        return ANALYST_LABELS[key]
+
+    return key
 
 
 
@@ -74,8 +84,7 @@ def bg_return(v):
     return ""
 
 
-
-# ---------- YAHOO STATUS ----------
+# ---------- STATUS ----------
 
 def yahoo_test():
 
@@ -87,8 +96,6 @@ def yahoo_test():
         return False
 
 
-
-# ---------- STOCKANALYSIS TARGETS ----------
 
 def stockanalysis_targets(ticker):
 
@@ -106,9 +113,7 @@ def stockanalysis_targets(ticker):
 
         txt=soup.get_text(" ")
 
-
         nums=re.findall(r"\d+\.\d+",txt)
-
 
         if len(nums)<3:
             return None
@@ -116,9 +121,7 @@ def stockanalysis_targets(ticker):
 
         return float(nums[0]),float(nums[1]),float(nums[2])
 
-
     except:
-
         return None
 
 
@@ -151,44 +154,37 @@ def fetch_one(ticker):
 
         "Ticker":ticker,
 
-        "Preço":price,
-
         "1D":pct_change(closes,1),
-
         "1W":pct_change(closes,5),
-
         "2W":pct_change(closes,10),
-
         "3M":pct_change(closes,63),
-
         "6M":pct_change(closes,126),
-
         "1Y":pct_change(closes,252),
 
         "Analistas":"—",
 
+        "Preço":price,
+
         "Target Min":None,
-
         "Target Médio":None,
-
         "Target Máx":None,
 
         "Fonte":"—"
     }
 
 
-    # Yahoo
+    # Yahoo principal
 
     try:
 
         info=tk.info
 
-        row["Analistas"]=info.get("recommendationKey","—")
+        key=info.get("recommendationKey")
+
+        row["Analistas"]=pretty_label(key)
 
         row["Target Min"]=info.get("targetLowPrice")
-
         row["Target Médio"]=info.get("targetMeanPrice")
-
         row["Target Máx"]=info.get("targetHighPrice")
 
         row["Fonte"]="Yahoo"
@@ -235,7 +231,36 @@ def build_df(tickers):
 
 def show_table(df):
 
+    if df.empty:
+        st.warning("Sem dados")
+        return
+
+
+    df=df[[
+
+        "Ticker",
+
+        "1D",
+        "1W",
+        "2W",
+        "3M",
+        "6M",
+        "1Y",
+
+        "Analistas",
+
+        "Preço",
+
+        "Target Min",
+        "Target Médio",
+        "Target Máx",
+
+        "Fonte"
+    ]]
+
+
     styler=df.style
+
 
     for c in ["1D","1W","2W","3M","6M","1Y"]:
         styler=styler.applymap(bg_return,subset=[c])
@@ -261,7 +286,7 @@ def show_table(df):
     st.dataframe(
         styler,
         use_container_width=True,
-        height=450
+        height=520
     )
 
 
