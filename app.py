@@ -1,7 +1,9 @@
+import os
 import re
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import requests
 
 # ----------------- CONFIG -----------------
 INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA"]
@@ -65,6 +67,94 @@ def is_strong_buy_label(label: str) -> bool:
     return isinstance(label, str) and label.strip().startswith("🟢")
 
 
+def _to_float(x):
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def _first_not_none(*vals):
+    for v in vals:
+        v2 = _to_float(v)
+        if v2 is not None:
+            return v2
+    return None
+
+
+# ----------------- FINNHUB FALLBACK -----------------
+def finnhub_price_targets(symbol: str):
+    """
+    Finnhub Price Target endpoint:
+    https://finnhub.io/docs/api/price-target  [oai_citation:3‡Finnhub](https://finnhub.io/docs/api/price-target?utm_source=chatgpt.com)
+    Retorna dict normalmente com low / mean / high (pode variar).
+    """
+    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    url = "https://finnhub.io/api/v1/stock/price-target"
+    try:
+        r = requests.get(url, params={"symbol": symbol, "token": api_key}, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def finnhub_recommendation_key(symbol: str):
+    """
+    Finnhub Recommendation Trends endpoint:
+    https://finnhub.io/docs/api/recommendation-trends  [oai_citation:4‡Finnhub](https://finnhub.io/docs/api/recommendation-trends?utm_source=chatgpt.com)
+    Retorna lista por período. Usamos o item mais recente.
+    Convertendo para recommendationKey estilo Yahoo (aproximação).
+    """
+    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    try:
+        r = requests.get(url, params={"symbol": symbol, "token": api_key}, timeout=10)
+        if r.status_code != 200:
+            return None
+        arr = r.json()
+        if not isinstance(arr, list) or not arr:
+            return None
+
+        latest = arr[0]  # normalmente já vem ordenado por data desc
+        if not isinstance(latest, dict):
+            return None
+
+        buy = (latest.get("buy") or 0)
+        strong_buy = (latest.get("strongBuy") or 0)
+        hold = (latest.get("hold") or 0)
+        sell = (latest.get("sell") or 0)
+        strong_sell = (latest.get("strongSell") or 0)
+
+        # Heurística simples para virar "recommendationKey"
+        if strong_buy >= max(buy, hold, sell, strong_sell) and strong_buy > 0:
+            return "strong_buy"
+        if buy >= max(hold, sell, strong_sell) and buy > 0:
+            return "buy"
+        if hold >= max(sell, strong_sell) and hold > 0:
+            return "hold"
+        if strong_sell >= max(sell, 0) and strong_sell > 0:
+            return "strong_sell"
+        if sell > 0:
+            return "sell"
+
+        return None
+    except Exception:
+        return None
+
+
 # ----------------- CACHE (TTL 5min) -----------------
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_one(ticker: str):
@@ -97,17 +187,41 @@ def fetch_one(ticker: str):
         "Erro": "",
     }
 
+    # 1) Yahoo via yfinance tk.info
+    info = {}
     try:
         info = tk.info or {}
-        rec = info.get("recommendationKey")
-        row["Analistas_key"] = rec
-        row["Analistas"] = pretty_analyst_label(rec)
-
-        row["Target Min"] = info.get("targetLowPrice")
-        row["Target Médio"] = info.get("targetMeanPrice")
-        row["Target Máx"] = info.get("targetHighPrice")
     except Exception:
-        pass
+        info = {}
+
+    rec = info.get("recommendationKey")
+    row["Analistas_key"] = rec
+    row["Analistas"] = pretty_analyst_label(rec)
+
+    row["Target Min"] = _to_float(info.get("targetLowPrice"))
+    row["Target Médio"] = _to_float(info.get("targetMeanPrice"))
+    row["Target Máx"] = _to_float(info.get("targetHighPrice"))
+
+    # 2) Se targets vierem vazios, tenta Finnhub Price Target
+    if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
+        fh = finnhub_price_targets(ticker)
+        if isinstance(fh, dict):
+            # Finnhub costuma usar low/mean/high
+            row["Target Min"] = _first_not_none(row["Target Min"], fh.get("low"), fh.get("targetLowPrice"))
+            row["Target Médio"] = _first_not_none(row["Target Médio"], fh.get("mean"), fh.get("targetMeanPrice"))
+            row["Target Máx"] = _first_not_none(row["Target Máx"], fh.get("high"), fh.get("targetHighPrice"))
+
+            if row["Target Min"] is not None or row["Target Médio"] is not None or row["Target Máx"] is not None:
+                # se o Yahoo não tinha rec, tenta pegar recomendação pela Finnhub
+                if not row["Analistas_key"]:
+                    rec2 = finnhub_recommendation_key(ticker)
+                    row["Analistas_key"] = rec2
+                    row["Analistas"] = pretty_analyst_label(rec2)
+
+        if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
+            if row["Erro"]:
+                row["Erro"] += " | "
+            row["Erro"] += "Sem targets (Yahoo/Finnhub)"
 
     return row
 
@@ -193,7 +307,6 @@ def show_strong_buy_top5(df_raw: pd.DataFrame):
         return
 
     # Ordena por 1Y (fallback 6M, depois 3M)
-    # Cria uma coluna score com prioridade
     def score_row(r):
         for m in ["1Y", "6M", "3M"]:
             v = r.get(m)
@@ -204,9 +317,7 @@ def show_strong_buy_top5(df_raw: pd.DataFrame):
     sb["score"] = sb.apply(score_row, axis=1)
     sb = sb.sort_values("score", ascending=False).head(5)
 
-    # Mostra Top 5 Strong Buy
     for idx, r in enumerate(sb.itertuples(index=False), start=1):
-        # acessar colunas pelo nome pode variar no itertuples; vamos usar dict
         row = r._asdict()
         ticker = row.get("Ticker")
         score = row.get("score")
@@ -257,6 +368,7 @@ def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
                     axis=1
                 )
 
+    # Formatação: nunca mostrar "None" — mostra vazio
     fmt = {}
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
         if c in df.columns:
@@ -270,7 +382,7 @@ def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
     styler = styler.format(fmt)
 
     st.dataframe(styler, use_container_width=True)
-    st.caption("Dados ao vivo via Yahoo Finance (yfinance). Atualização automática a cada 5 min + botão manual.")
+    st.caption("Dados ao vivo via Yahoo (yfinance) + fallback Finnhub. Atualização automática a cada 5 min + botão manual.")
 
 
 def ticker_manager(title: str, key_state: str, default_list: list[str]):
@@ -311,6 +423,10 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
 
         st.caption(f"Atualização automática: a cada {TTL_SECONDS//60} min.")
 
+        # Aviso se Finnhub não estiver configurado
+        if not os.getenv("FINNHUB_API_KEY"):
+            st.warning("FINNHUB_API_KEY não configurada. O fallback Finnhub não será usado.")
+
     with right:
         st.markdown("**Tickers atuais**")
         if not tickers:
@@ -329,10 +445,7 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
 
         df_raw = build_df(st.session_state[key_state])
 
-        # Strong Buy + Top 5 Strong Buy
         show_strong_buy_top5(df_raw)
-
-        # Rankings padrão
         show_rankings(df_raw)
 
         st.divider()
