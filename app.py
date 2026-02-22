@@ -85,16 +85,17 @@ def _first_not_none(*vals):
 
 
 # ----------------- FINNHUB -----------------
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+def _finnhub_key():
+    return os.getenv("FINNHUB_API_KEY", "").strip()
 
 
 def finnhub_get(url: str, params: dict):
-    """Centraliza request + retorno de diagnóstico."""
-    if not FINNHUB_API_KEY:
+    api_key = _finnhub_key()
+    if not api_key:
         return None, {"ok": False, "reason": "FINNHUB_API_KEY vazia/não configurada"}
 
     try:
-        r = requests.get(url, params={**params, "token": FINNHUB_API_KEY}, timeout=12)
+        r = requests.get(url, params={**params, "token": api_key}, timeout=12)
         diag = {"ok": r.status_code == 200, "status": r.status_code, "text": r.text[:500]}
         if r.status_code != 200:
             return None, diag
@@ -106,20 +107,11 @@ def finnhub_get(url: str, params: dict):
 
 
 def finnhub_price_targets(symbol: str):
-    # https://finnhub.io/api/v1/stock/price-target
-    data, diag = finnhub_get(
-        "https://finnhub.io/api/v1/stock/price-target",
-        {"symbol": symbol},
-    )
-    return data, diag
+    return finnhub_get("https://finnhub.io/api/v1/stock/price-target", {"symbol": symbol})
 
 
 def finnhub_recommendation_key(symbol: str):
-    # https://finnhub.io/api/v1/stock/recommendation
-    arr, diag = finnhub_get(
-        "https://finnhub.io/api/v1/stock/recommendation",
-        {"symbol": symbol},
-    )
+    arr, diag = finnhub_get("https://finnhub.io/api/v1/stock/recommendation", {"symbol": symbol})
     if not isinstance(arr, list) or not arr:
         return None, diag
 
@@ -150,18 +142,22 @@ def finnhub_recommendation_key(symbol: str):
 # ----------------- SIDEBAR DIAGNOSTIC -----------------
 with st.sidebar:
     st.header("Diagnóstico")
-    st.write("Finnhub key detectada:", "✅" if FINNHUB_API_KEY else "❌")
-    if FINNHUB_API_KEY:
+    has_key = bool(_finnhub_key())
+    st.write("Finnhub key detectada:", "✅" if has_key else "❌")
+    if has_key:
         st.caption("A chave não é mostrada por segurança.")
-    test_symbol = st.text_input("Testar Finnhub com ticker", value="NVDA")
-    if st.button("Rodar teste Finnhub"):
-        pt, diag_pt = finnhub_price_targets(normalize_ticker(test_symbol))
+
+    test_symbol = st.text_input("Testar Finnhub com ticker", value="NVDA", key="diag_symbol_input")
+    if st.button("Rodar teste Finnhub", key="diag_run_btn"):
+        sym = normalize_ticker(test_symbol)
+
+        pt, diag_pt = finnhub_price_targets(sym)
         st.subheader("Price Target")
         st.json(diag_pt)
         st.subheader("Payload (preview)")
         st.write(pt)
 
-        rk, diag_rk = finnhub_recommendation_key(normalize_ticker(test_symbol))
+        rk, diag_rk = finnhub_recommendation_key(sym)
         st.subheader("Recommendation")
         st.json(diag_rk)
         st.write("recommendationKey:", rk)
@@ -199,7 +195,7 @@ def fetch_one(ticker: str):
         "Erro": "",
     }
 
-    # 1) Yahoo via tk.info
+    # Yahoo
     info = {}
     try:
         info = tk.info or {}
@@ -214,7 +210,7 @@ def fetch_one(ticker: str):
     row["Target Médio"] = _to_float(info.get("targetMeanPrice"))
     row["Target Máx"] = _to_float(info.get("targetHighPrice"))
 
-    # 2) Finnhub fallback
+    # Finnhub fallback
     if row["Target Min"] is None and row["Target Médio"] is None and row["Target Máx"] is None:
         pt, _diag = finnhub_price_targets(ticker)
         if isinstance(pt, dict):
@@ -249,7 +245,7 @@ def build_df(tickers: list[str]) -> pd.DataFrame:
 
 # ----------------- STYLES (CORES) -----------------
 def _bg_for_return(v):
-    if v is None or pd.isna(v):
+    if v is None or pd.isna(v) or v == "":
         return ""
     try:
         v = float(v)
@@ -263,7 +259,7 @@ def _bg_for_return(v):
 
 
 def _bg_for_target(v, current_price):
-    if v is None or pd.isna(v) or current_price is None or pd.isna(current_price):
+    if v is None or v == "" or pd.isna(v) or current_price is None or current_price == "" or pd.isna(current_price):
         return ""
     try:
         v = float(v)
@@ -275,6 +271,75 @@ def _bg_for_target(v, current_price):
     if v < current_price:
         return "background-color: rgba(255, 0, 0, 0.12);"
     return "background-color: rgba(120, 120, 120, 0.08);"
+
+
+def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
+    st.subheader("Tabela ao vivo")
+
+    if df_raw is None or df_raw.empty:
+        st.warning("Lista vazia. Adicione um ticker.")
+        return
+
+    df = df_raw.copy()
+
+    if only_strong_buy and "Analistas" in df.columns:
+        df = df[df["Analistas"].apply(is_strong_buy_label)].copy()
+
+    if df.empty:
+        st.info("Sem linhas para mostrar (filtro ativo ou sem dados).")
+        return
+
+    final_cols = [
+        "Ticker",
+        "1D", "1W", "2W", "3M", "6M", "1Y",
+        "Analistas",
+        "Preço",
+        "Target Min", "Target Médio", "Target Máx",
+        "Erro",
+    ]
+    df = df[[c for c in final_cols if c in df.columns]]
+
+    # troca None por ""
+    df = df.where(pd.notnull(df), "")
+
+    styler = df.style
+
+    for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
+        if c in df.columns:
+            styler = styler.applymap(_bg_for_return, subset=[c])
+
+    if "Preço" in df.columns:
+        for c in ["Target Min", "Target Médio", "Target Máx"]:
+            if c in df.columns:
+                styler = styler.apply(
+                    lambda row, col=c: [
+                        _bg_for_target(row[col], row["Preço"]) if idx == df.columns.get_loc(col) else ""
+                        for idx in range(len(df.columns))
+                    ],
+                    axis=1
+                )
+
+    def fmt_pct(x):
+        if x == "" or x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return f"{float(x)*100:.2f}%"
+
+    def fmt_num(x):
+        if x == "" or x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return f"{float(x):.2f}"
+
+    fmt = {c: fmt_pct for c in ["1D", "1W", "2W", "3M", "6M", "1Y"] if c in df.columns}
+    if "Preço" in df.columns:
+        fmt["Preço"] = fmt_num
+    for c in ["Target Min", "Target Médio", "Target Máx"]:
+        if c in df.columns:
+            fmt[c] = fmt_num
+
+    styler = styler.format(fmt)
+
+    st.dataframe(styler, use_container_width=True)
+    st.caption("Dados via Yahoo (yfinance) + fallback Finnhub. Atualização automática a cada 5 min + botão manual.")
 
 
 def show_rankings(df_raw: pd.DataFrame):
@@ -331,68 +396,6 @@ def show_strong_buy_top5(df_raw: pd.DataFrame):
         st.write(f"{idx}. {ticker} — desempenho (prioridade 1Y/6M/3M): {score*100:.2f}% — Preço: {price:.2f}")
 
 
-def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
-    st.subheader("Tabela ao vivo")
-
-    if df_raw is None or df_raw.empty:
-        st.warning("Lista vazia. Adicione um ticker.")
-        return
-
-    df = df_raw.copy()
-
-    if only_strong_buy and "Analistas" in df.columns:
-        df = df[df["Analistas"].apply(is_strong_buy_label)].copy()
-
-    if df.empty:
-        st.info("Sem linhas para mostrar (filtro ativo ou sem dados).")
-        return
-
-    final_cols = [
-        "Ticker",
-        "1D", "1W", "2W", "3M", "6M", "1Y",
-        "Analistas",
-        "Preço",
-        "Target Min", "Target Médio", "Target Máx",
-        "Erro",
-    ]
-    df = df[[c for c in final_cols if c in df.columns]]
-
-    # *** IMPORTANTE: trocar None por vazio ANTES do styler ***
-    df = df.where(pd.notnull(df), "")
-
-    styler = df.style
-
-    for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
-        if c in df.columns:
-            styler = styler.applymap(_bg_for_return, subset=[c])
-
-    if "Preço" in df.columns:
-        for c in ["Target Min", "Target Médio", "Target Máx"]:
-            if c in df.columns:
-                styler = styler.apply(
-                    lambda row, col=c: [
-                        _bg_for_target(row[col], row["Preço"]) if idx == df.columns.get_loc(col) else ""
-                        for idx in range(len(df.columns))
-                    ],
-                    axis=1
-                )
-
-    fmt = {}
-    for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
-        if c in df.columns:
-            fmt[c] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x)*100:.2f}%"
-    if "Preço" in df.columns:
-        fmt["Preço"] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x):.2f}"
-    for c in ["Target Min", "Target Médio", "Target Máx"]:
-        if c in df.columns:
-            fmt[c] = lambda x: "" if (x == "" or x is None or (isinstance(x, float) and pd.isna(x))) else f"{float(x):.2f}"
-
-    styler = styler.format(fmt)
-
-    st.dataframe(styler, use_container_width=True)
-    st.caption("Dados via Yahoo (yfinance) + fallback Finnhub. Atualização automática a cada 5 min + botão manual.")
-
-
 def ticker_manager(title: str, key_state: str, default_list: list[str]):
     st.markdown(f"### {title}")
 
@@ -401,11 +404,12 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
 
     with left:
         st.markdown("**Adicionar ação**")
-        new_t = st.text_input("Ticker", key=f"{key_state}_new", placeholder="Ex: AAPL, TSLA, NVDA")
+        # keys mais "namespaced" para evitar qualquer conflito
+        new_t = st.text_input("Ticker", key=f"tm__{key_state}__new", placeholder="Ex: AAPL, TSLA, NVDA")
 
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("Adicionar", key=f"{key_state}_add"):
+            if st.button("Adicionar", key=f"tm__{key_state}__add"):
                 t = normalize_ticker(new_t)
                 if not t:
                     st.warning("Digite um ticker válido.")
@@ -417,14 +421,14 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
                     st.rerun()
 
         with c2:
-            if st.button("Resetar", key=f"{key_state}_reset"):
+            if st.button("Resetar", key=f"tm__{key_state}__reset"):
                 st.session_state[key_state] = default_list.copy()
                 st.success("Lista resetada.")
                 st.rerun()
 
         st.divider()
 
-        if st.button("Atualizar agora", key=f"{key_state}_manual_refresh"):
+        if st.button("Atualizar agora", key=f"tm__{key_state}__manual_refresh"):
             st.cache_data.clear()
             st.success("Atualizado manualmente.")
             st.rerun()
@@ -440,7 +444,7 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
             for i, t in enumerate(tickers):
                 with cols[i]:
                     st.write(t)
-                    if st.button("❌", key=f"{key_state}_del_{i}"):
+                    if st.button("❌", key=f"tm__{key_state}__del_{i}"):
                         try:
                             st.session_state[key_state].remove(t)
                         except ValueError:
@@ -453,8 +457,7 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
         show_rankings(df_raw)
 
         st.divider()
-        only_sb = st.checkbox("Mostrar só 🟢 Compra forte (Strong Buy)", value=False, key=f"{key_state}_only_sb")
-
+        only_sb = st.checkbox("Mostrar só 🟢 Compra forte (Strong Buy)", value=False, key=f"tm__{key_state}__only_sb")
         show_table_colored(df_raw, only_strong_buy=only_sb)
 
 
@@ -463,9 +466,6 @@ tab1, tab2 = st.tabs(["Investidos", "Em análise"])
 
 with tab1:
     ticker_manager("Investidos (editável)", "tickers_investidos", INVESTIDOS_DEFAULT)
-
-with tab2:
-    ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
 
 with tab2:
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
