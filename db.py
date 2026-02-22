@@ -1,39 +1,12 @@
 import os
-import socket
-from urllib.parse import urlparse, parse_qs
-
 import psycopg2
 
 DB_URL = os.environ["DATABASE_URL"]
 
 def get_conn():
-    u = urlparse(DB_URL)
-
-    # user/pass
-    user = u.username
-    password = u.password
-
-    # host/port/db
-    host = u.hostname
-    port = u.port or 5432
-    dbname = (u.path or "").lstrip("/") or "postgres"
-
-    # força IPv4 (resolve hostname -> IPv4)
-    host_ipv4 = socket.gethostbyname(host)
-
-    # sslmode (recomendado: require)
-    qs = parse_qs(u.query or "")
-    sslmode = (qs.get("sslmode", ["require"])[0]) or "require"
-
-    return psycopg2.connect(
-        dbname=dbname,
-        user=user,
-        password=password,
-        host=host_ipv4,
-        port=port,
-        sslmode=sslmode,
-        connect_timeout=10,
-    )
+    conn = psycopg2.connect(DB_URL, connect_timeout=15)
+    conn.autocommit = True
+    return conn
 
 def init_db():
     sql = """
