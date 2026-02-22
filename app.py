@@ -38,7 +38,7 @@ NASDAQ100_FALLBACK = [
     "MAR","CDNS","FTNT","NXPI","MELI","ORLY","CRWD","ODFL","ASML","CTAS","CHTR","KDP","MDLZ","MNST","SBUX",
     "PYPL","ADP","ABNB","ALNY","AEP","AMGN","APP","ARM","AZN","BIIB","BKR","CCEP","CEG","COP","CPRT","CSGP",
     "DASH","DDOG","DXCM","EA","EXC","FANG","FAST","GEHC","HON","IDXX","ILMN","JD","KHC","LIN","LULU","MRVL",
-    "MSTR","NFLX","ON","PDD","PLTR","ROST","SHOP","SMCI","SNOW","TEAM","TTWO","VRSK","VRTX","WBD","WDAY","XEL",
+    "MSTR","ON","PDD","PLTR","ROST","SHOP","SMCI","SNOW","TEAM","TTWO","VRSK","VRTX","WBD","WDAY","XEL",
     "ZM","ZS"
 ]
 
@@ -95,35 +95,35 @@ def fmt_price(x):
 def get_nasdaq100_tickers() -> list[str]:
     """
     Tenta pegar a lista atual de componentes do Nasdaq-100.
-    1) Wikipedia (tabela 'Components' / 'Current components')
+    1) Wikipedia (tabela com coluna 'Ticker')
     2) fallback local (lista embutida)
     """
     try:
-        # A página do Nasdaq-100 costuma ter uma tabela com tickers ("Ticker")
         url = "https://en.wikipedia.org/wiki/Nasdaq-100"
         tables = pd.read_html(url)
-        # tenta achar uma tabela que contenha a coluna "Ticker"
         for tb in tables:
             if "Ticker" in tb.columns:
                 tickers = tb["Ticker"].astype(str).str.strip().tolist()
                 tickers = [normalize_ticker(t) for t in tickers if normalize_ticker(t)]
-                # remove eventuais duplicados/ruídos
                 tickers = sorted(list(set(tickers)))
                 if len(tickers) >= 80:
                     return tickers
     except Exception:
         pass
 
-    # fallback
     return sorted(list(set([normalize_ticker(t) for t in NASDAQ100_FALLBACK if normalize_ticker(t)])))
 
 
 # ================== FETCH (TTL 5min) ==================
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_one(ticker: str):
+    """
+    Versão corrigida:
+    - Targets e recommendationKey via tk.get_info() (mais estável que tk.info)
+    """
     tk = yf.Ticker(ticker)
 
-    hist = tk.history(period="13mo", interval="1d")
+    hist = tk.history(period="13mo")
     if hist is None or hist.empty:
         return {"Ticker": ticker, "Erro": "Sem dados"}
 
@@ -151,17 +151,23 @@ def fetch_one(ticker: str):
     }
 
     try:
-        info = tk.info or {}
+        info = tk.get_info() or {}
         rec = info.get("recommendationKey")
         row["Analistas_key"] = rec
         row["Analistas"] = pretty_label(rec)
+
         row["Target Min"] = info.get("targetLowPrice")
         row["Target Médio"] = info.get("targetMeanPrice")
         row["Target Máx"] = info.get("targetHighPrice")
     except Exception:
-        pass
+        # não trava o app por causa disso
+        row["Erro"] = (row.get("Erro") or "")
+        if row["Erro"]:
+            row["Erro"] += " | "
+        row["Erro"] += "Sem targets"
 
     return row
+
 
 def build_df(tickers: list[str]) -> pd.DataFrame:
     if not tickers:
@@ -249,7 +255,10 @@ def show_strong_buy_top5(df_raw: pd.DataFrame):
 
     for idx, r in enumerate(sb.itertuples(index=False), start=1):
         d = r._asdict()
-        st.write(f"{idx}. {d.get('Ticker')} — {d.get('Analistas')} — perf: {d.get('perf_score')*100:.2f}% — Preço: {d.get('Preço'):.2f}")
+        st.write(
+            f"{idx}. {d.get('Ticker')} — {d.get('Analistas')} — "
+            f"perf: {d.get('perf_score')*100:.2f}% — Preço: {d.get('Preço'):.2f}"
+        )
 
 def show_top5_nasdaq100_recommended():
     st.subheader("⭐ Top 5 mais recomendadas do Nasdaq-100 (geral)")
@@ -259,14 +268,11 @@ def show_top5_nasdaq100_recommended():
         st.info("Não consegui obter a lista do Nasdaq-100.")
         return
 
-    # Coleta dados do universo Nasdaq-100 (pode ser demorado no 1º load, depois fica cacheado)
     df = build_df(tickers)
-
     if df is None or df.empty:
         st.info("Sem dados.")
         return
 
-    # score recomendação + desempate por performance (1Y -> 6M -> 3M)
     df["rec_score"] = df["Analistas_key"].map(lambda x: REC_SCORE.get(x, 0))
 
     def perf_score(r):
@@ -278,7 +284,6 @@ def show_top5_nasdaq100_recommended():
 
     df["perf_score"] = df.apply(perf_score, axis=1)
 
-    # Ordena: recomendação melhor primeiro, depois melhor performance
     df = df.sort_values(["rec_score", "perf_score"], ascending=[False, False]).head(5)
 
     if df.empty:
@@ -291,7 +296,10 @@ def show_top5_nasdaq100_recommended():
         label = d.get("Analistas", "—")
         perf = d.get("perf_score")
         price = d.get("Preço")
-        st.write(f"{idx}. {ticker} — {label} — perf (1Y/6M/3M): {perf*100:.2f}% — Preço: {price:.2f}")
+        st.write(
+            f"{idx}. {ticker} — {label} — "
+            f"perf (1Y/6M/3M): {perf*100:.2f}% — Preço: {price:.2f}"
+        )
 
 def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
     st.subheader("Tabela ao vivo")
@@ -307,7 +315,6 @@ def show_table_colored(df_raw: pd.DataFrame, only_strong_buy: bool):
         st.info("Sem linhas para mostrar (filtro ativo ou sem dados).")
         return
 
-    # Preço entre Analistas e Target Min
     final_cols = [
         "Ticker",
         "1D", "1W", "2W", "3M", "6M", "1Y",
@@ -388,7 +395,6 @@ def ticker_manager(title: str, key_state: str, default_list: list[str], show_glo
         st.caption(f"Atualização automática: a cada {TTL_SECONDS//60} min.")
 
     with right:
-        # Mostra Top 5 geral do Nasdaq-100 (independente da lista)
         if show_global_n100:
             show_top5_nasdaq100_recommended()
             st.divider()
@@ -426,5 +432,4 @@ with tab1:
     ticker_manager("Investidos (editável)", "tickers_investidos", INVESTIDOS_DEFAULT, show_global_n100=False)
 
 with tab2:
-    # Top 5 Nasdaq-100 aparece aqui (geral), sem depender da lista "Em análise"
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT, show_global_n100=True)
