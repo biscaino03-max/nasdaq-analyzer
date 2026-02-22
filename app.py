@@ -10,14 +10,7 @@ from bs4 import BeautifulSoup
 INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA"]
 EM_ANALISE_DEFAULT = []
 
-WINDOWS = {
-    "1D": 1,
-    "1W": 5,
-    "2W": 10,
-    "3M": 63,
-    "6M": 126,
-    "1Y": 252,
-}
+WINDOWS = {"1D": 1, "1W": 5, "2W": 10, "3M": 63, "6M": 126, "1Y": 252}
 
 ANALYST_LABELS = {
     "strong_buy": "🟢 Compra forte",
@@ -29,8 +22,8 @@ ANALYST_LABELS = {
     "none": "—",
 }
 
-TTL_SECONDS = 300
-TTL_LONG_SECONDS = 6 * 60 * 60  # 6h
+TTL_SECONDS = 300          # 5 min para cotações/tabela
+TTL_LONG_SECONDS = 6 * 3600  # 6h para listas Top 5 / Nasdaq-100
 
 st.set_page_config(page_title="Nasdaq Analyzer", layout="wide")
 st.title("Nasdaq Analyzer (ao vivo)")
@@ -43,14 +36,12 @@ if "tickers_investidos" not in st.session_state:
 if "tickers_em_analise" not in st.session_state:
     st.session_state.tickers_em_analise = EM_ANALISE_DEFAULT.copy()
 
-
 # ---------- HELPERS ----------
 
 def normalize_ticker(t: str) -> str:
     t = (t or "").upper().strip()
     t = re.sub(r"[^A-Z0-9\.\-]", "", t)
     return t
-
 
 def pct_change(closes: pd.Series, n: int):
     if closes is None or closes.empty or len(closes) <= n:
@@ -61,12 +52,10 @@ def pct_change(closes: pd.Series, n: int):
         return None
     return float((last / prev) - 1.0)
 
-
 def pretty_label(key):
     if key in ANALYST_LABELS:
         return ANALYST_LABELS[key]
     return "—" if key is None else str(key)
-
 
 def bg_return(v):
     if v is None or pd.isna(v):
@@ -81,16 +70,40 @@ def bg_return(v):
         return "background-color:rgba(255,0,0,0.18)"
     return "background-color:rgba(120,120,120,0.10)"
 
-
 def _http_get(url: str, timeout=12):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+        )
     }
     return requests.get(url, headers=headers, timeout=timeout)
 
+def _as_float(x):
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except Exception:
+        return None
 
-# ---------- STATUS ----------
+def validate_and_fix_targets(low, mean, high):
+    """
+    Retorna (low2, mean2, high2, ok_bool, msg)
+    - Se algum None: ok_bool=None
+    - Se incoerente: reordena e marca alerta
+    """
+    lowf, meanf, highf = _as_float(low), _as_float(mean), _as_float(high)
+    if lowf is None or meanf is None or highf is None:
+        return lowf, meanf, highf, None, "targets incompletos"
+    ok = (lowf <= meanf <= highf)
+    if ok:
+        return lowf, meanf, highf, True, ""
+    # Corrige reordenando
+    lo2, mi2, hi2 = sorted([lowf, meanf, highf])
+    return lo2, mi2, hi2, False, "targets incoerentes (corrigidos)"
+
+# ---------- SOURCES STATUS (DIAGNÓSTICO) ----------
 
 def yahoo_test():
     try:
@@ -100,14 +113,28 @@ def yahoo_test():
     except Exception:
         return False
 
+def marketbeat_test():
+    try:
+        # Página estável para teste
+        url = "https://www.marketbeat.com/stocks/NASDAQ/MSFT/price-target/"
+        r = _http_get(url, timeout=12)
+        return r.status_code == 200 and ("Price Target" in r.text or "price target" in r.text.lower())
+    except Exception:
+        return False
 
-# ---------- STOCKANALYSIS: TARGETS ----------
+def stockanalysis_test():
+    try:
+        return stockanalysis_targets("MSFT") is not None
+    except Exception:
+        return False
+
+# ---------- STOCKANALYSIS (fallback 2) ----------
 
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def stockanalysis_targets(ticker: str):
     """
-    Extrai Low/Average/High na ordem correta do /forecast/ do StockAnalysis.
-    Retorna (low, avg, high) ou None.
+    /forecast/ -> Target Low / Average / High (usamos Average como Target Médio)
+    Retorna (low, mean, high) ou None
     """
     try:
         url = f"https://stockanalysis.com/stocks/{ticker.lower()}/forecast/"
@@ -116,34 +143,132 @@ def stockanalysis_targets(ticker: str):
             return None
 
         text = r.text
-
         m = re.search(
             r"Target\s+Low\s+Average\s+Median\s+High.*?Price\$(\d+(?:\.\d+)?)\$(\d+(?:\.\d+)?)\$(\d+(?:\.\d+)?)\$(\d+(?:\.\d+)?)",
             text,
-            flags=re.DOTALL | re.IGNORECASE
+            flags=re.DOTALL | re.IGNORECASE,
         )
         if not m:
             return None
 
         low = float(m.group(1))
-        avg = float(m.group(2))
+        mean = float(m.group(2))
         high = float(m.group(4))
 
-        # Garantir coerência
-        low, avg, high = sorted([low, avg, high])
-        return low, avg, high
+        low, mean, high, ok, msg = validate_and_fix_targets(low, mean, high)
+        return (low, mean, high)
     except Exception:
         return None
 
+# ---------- MARKETBEAT (fallback 1) ----------
 
-def stockanalysis_test():
+def _mb_try_extract_targets_from_text(txt: str):
+    """
+    MarketBeat costuma ter termos:
+    'Low Price Target', 'Average Price Target', 'High Price Target'
+    Retorna (low, mean, high) ou None
+    """
+    if not txt:
+        return None
+
+    def find_num(patterns):
+        for pat in patterns:
+            m = re.search(pat, txt, flags=re.IGNORECASE)
+            if m:
+                try:
+                    return float(m.group(1))
+                except Exception:
+                    pass
+        return None
+
+    low = find_num([
+        r"Low\s+Price\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+        r"Low\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+    ])
+    mean = find_num([
+        r"Average\s+Price\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+        r"Average\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+        r"Consensus\s+Price\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+    ])
+    high = find_num([
+        r"High\s+Price\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+        r"High\s+Target[^$]*\$\s*(\d+(?:\.\d+)?)",
+    ])
+
+    if low is None and mean is None and high is None:
+        return None
+
+    low, mean, high, ok, msg = validate_and_fix_targets(low, mean, high)
+    return (low, mean, high)
+
+def _mb_try_extract_rating(txt: str):
+    """
+    MarketBeat costuma mostrar "Consensus Rating" (ex.: Moderate Buy / Buy / Hold / Sell / Strong Buy).
+    Converte para nossos labels quando possível.
+    """
+    if not txt:
+        return None
+
+    m = re.search(r"Consensus\s+Rating[^A-Za-z]*([A-Za-z ]{3,30})", txt, flags=re.IGNORECASE)
+    if not m:
+        # fallback mais simples
+        m = re.search(r"(Strong\s+Buy|Moderate\s+Buy|Buy|Hold|Sell|Strong\s+Sell)", txt, flags=re.IGNORECASE)
+
+    if not m:
+        return None
+
+    rating = m.group(1).strip().lower()
+
+    if "strong" in rating and "buy" in rating:
+        return ANALYST_LABELS["strong_buy"]
+    if "moderate" in rating and "buy" in rating:
+        return ANALYST_LABELS["buy"]
+    if rating == "buy":
+        return ANALYST_LABELS["buy"]
+    if "hold" in rating:
+        return ANALYST_LABELS["hold"]
+    if "strong" in rating and "sell" in rating:
+        return ANALYST_LABELS["strong_sell"]
+    if "sell" in rating:
+        return ANALYST_LABELS["sell"]
+    return None
+
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def marketbeat_targets_and_rating(ticker: str):
+    """
+    Tenta obter targets e (se possível) rating/consenso no MarketBeat.
+    Retorna dict com keys:
+      targets: (low, mean, high) ou None
+      rating: label ou None
+      ok: bool|None
+      note: str
+    """
     try:
-        return stockanalysis_targets("MSFT") is not None
-    except Exception:
-        return False
+        url = f"https://www.marketbeat.com/stocks/NASDAQ/{ticker}/price-target/"
+        r = _http_get(url, timeout=12)
+        if r.status_code != 200:
+            return {"targets": None, "rating": None, "ok": None, "note": f"HTTP {r.status_code}"}
 
+        soup = BeautifulSoup(r.text, "html.parser")
+        txt = soup.get_text(" ", strip=True)
 
-# ---------- STOCKANALYSIS: TOP 5 STRONG BUY (NASDAQ-100) ----------
+        targets = _mb_try_extract_targets_from_text(txt)
+        rating = _mb_try_extract_rating(txt)
+
+        ok = None
+        note = ""
+        if targets:
+            low, mean, high = targets
+            _, _, _, ok, msg = validate_and_fix_targets(low, mean, high)
+            if ok is False:
+                note = msg
+
+        return {"targets": targets, "rating": rating, "ok": ok, "note": note}
+    except Exception as e:
+        return {"targets": None, "rating": None, "ok": None, "note": f"erro: {e}"}
+
+# ---------- TOP 5 (fixo no topo do Em análise) ----------
+# (Mantém usando StockAnalysis para ranking, pois é estável e não precisa API)
 
 @st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
 def stockanalysis_nasdaq100_set() -> set:
@@ -170,9 +295,11 @@ def stockanalysis_nasdaq100_set() -> set:
     except Exception:
         return set()
 
-
 @st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
 def stockanalysis_top5_strong_buy_nasdaq100() -> list:
+    """
+    Top Strong Buy (StockAnalysis) filtrado para Nasdaq-100
+    """
     try:
         url = "https://stockanalysis.com/analysts/top-stocks/"
         r = _http_get(url, timeout=12)
@@ -200,12 +327,12 @@ def stockanalysis_top5_strong_buy_nasdaq100() -> list:
                 tickers.append(tk)
             if len(tickers) >= 5:
                 break
+
         return tickers
     except Exception:
         return []
 
-
-# ---------- FETCH (YAHOO + FALLBACK) ----------
+# ---------- FETCH (PRIORIDADE: Yahoo -> MarketBeat -> StockAnalysis) ----------
 
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_one(ticker: str):
@@ -218,13 +345,14 @@ def fetch_one(ticker: str):
         "Preço": None,
         "Target Min": None, "Target Médio": None, "Target Máx": None,
         "Fonte": "—",
+        "Alerta": "",
         "Erro": "",
     }
 
+    # --- HISTÓRICO + PREÇO (Yahoo / yfinance) ---
     try:
         tk = yf.Ticker(ticker)
         hist = tk.history(period="13mo", interval="1d")
-
         if hist is None or hist.empty:
             row["Erro"] = "Sem histórico (Yahoo)"
             return row
@@ -234,8 +362,7 @@ def fetch_one(ticker: str):
             row["Erro"] = "Sem closes (Yahoo)"
             return row
 
-        last_close = float(closes.iloc[-1])
-        row["Preço"] = last_close
+        row["Preço"] = float(closes.iloc[-1])
 
         row["1D"] = pct_change(closes, WINDOWS["1D"])
         row["1W"] = pct_change(closes, WINDOWS["1W"])
@@ -244,45 +371,63 @@ def fetch_one(ticker: str):
         row["6M"] = pct_change(closes, WINDOWS["6M"])
         row["1Y"] = pct_change(closes, WINDOWS["1Y"])
 
-        # Yahoo: analistas + targets
-        try:
-            info = tk.info or {}
-            key = info.get("recommendationKey")
-            row["Analistas"] = pretty_label(key)
-
-            row["Target Min"] = info.get("targetLowPrice")
-            row["Target Médio"] = info.get("targetMeanPrice")
-            row["Target Máx"] = info.get("targetHighPrice")
-
-            row["Fonte"] = "Yahoo"
-        except Exception:
-            pass
-
     except Exception as e:
-        row["Erro"] = f"Erro Yahoo: {e}"
+        row["Erro"] = f"Erro Yahoo(historico): {e}"
         return row
 
-    # fallback StockAnalysis
-    if row["Target Médio"] is None:
-        t = stockanalysis_targets(ticker)
-        if t:
-            low, avg, high = t
-            row["Target Min"] = low
-            row["Target Médio"] = avg
-            row["Target Máx"] = high
-            row["Fonte"] = "StockAnalysis"
-
-    # segurança final (ordena)
+    # --- 1) Yahoo (prioridade máxima) ---
+    yahoo_ok = False
     try:
-        a, b, c = row.get("Target Min"), row.get("Target Médio"), row.get("Target Máx")
-        if a is not None and b is not None and c is not None:
-            low, mid, high = sorted([float(a), float(b), float(c)])
-            row["Target Min"], row["Target Médio"], row["Target Máx"] = low, mid, high
+        info = tk.info or {}
+        key = info.get("recommendationKey")
+        row["Analistas"] = pretty_label(key)
+
+        row["Target Min"] = info.get("targetLowPrice")
+        row["Target Médio"] = info.get("targetMeanPrice")
+        row["Target Máx"] = info.get("targetHighPrice")
+
+        if row["Target Médio"] is not None:
+            yahoo_ok = True
+            row["Fonte"] = "Yahoo"
     except Exception:
         pass
 
-    return row
+    # valida/ajusta se Yahoo trouxe algo incoerente
+    low, mean, high, ok, msg = validate_and_fix_targets(row["Target Min"], row["Target Médio"], row["Target Máx"])
+    if ok is False:
+        row["Target Min"], row["Target Médio"], row["Target Máx"] = low, mean, high
+        row["Alerta"] = "⚠️ " + msg
 
+    # --- 2) MarketBeat (fallback 1) ---
+    if row["Target Médio"] is None:
+        mb = marketbeat_targets_and_rating(ticker)
+        if mb.get("targets"):
+            low, mean, high = mb["targets"]
+            row["Target Min"], row["Target Médio"], row["Target Máx"] = low, mean, high
+            row["Fonte"] = "MarketBeat"
+
+            # Se Yahoo não tinha analistas úteis, tenta pegar rating do MarketBeat
+            if row["Analistas"] == "—" and mb.get("rating"):
+                row["Analistas"] = mb["rating"]
+
+            # alerta de coerência (se necessário)
+            _, _, _, ok2, msg2 = validate_and_fix_targets(low, mean, high)
+            if ok2 is False:
+                row["Alerta"] = "⚠️ " + msg2
+
+    # --- 3) StockAnalysis (fallback 2) ---
+    if row["Target Médio"] is None:
+        t = stockanalysis_targets(ticker)
+        if t:
+            low, mean, high = t
+            row["Target Min"], row["Target Médio"], row["Target Máx"] = low, mean, high
+            row["Fonte"] = "StockAnalysis"
+
+            _, _, _, ok3, msg3 = validate_and_fix_targets(low, mean, high)
+            if ok3 is False:
+                row["Alerta"] = "⚠️ " + msg3
+
+    return row
 
 def build_df(tickers: list) -> pd.DataFrame:
     tickers = [normalize_ticker(t) for t in (tickers or []) if normalize_ticker(t)]
@@ -295,9 +440,7 @@ def build_df(tickers: list) -> pd.DataFrame:
         rows.append(fetch_one(t))
         prog.progress(int(((i + 1) / len(tickers)) * 100))
     prog.empty()
-
     return pd.DataFrame(rows)
-
 
 # ---------- TABLE ----------
 
@@ -313,6 +456,7 @@ def show_table(df: pd.DataFrame, height=520):
         "Preço",
         "Target Min", "Target Médio", "Target Máx",
         "Fonte",
+        "Alerta",
     ]
     df = df[[c for c in cols if c in df.columns]].copy()
 
@@ -333,7 +477,6 @@ def show_table(df: pd.DataFrame, height=520):
 
     styler = styler.format(fmt)
     st.dataframe(styler, use_container_width=True, height=height)
-
 
 # ---------- MANAGER (EDITÁVEL) ----------
 
@@ -364,6 +507,8 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
         st.cache_data.clear()
         st.rerun()
 
+    st.caption(f"Auto (TTL cache): {TTL_SECONDS//60} min. Manual: botão acima.")
+
     if tickers:
         st.markdown("**Tickers atuais (clique ❌ para remover):**")
         cols = st.columns(min(len(tickers), 8))
@@ -383,7 +528,6 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
     df = build_df(st.session_state[key_state])
     show_table(df)
 
-
 # ---------- TABS ----------
 
 tab1, tab2, tab3 = st.tabs(["Investidos", "Em análise", "Diagnóstico"])
@@ -392,7 +536,6 @@ with tab1:
     ticker_manager("Investidos (editável)", "tickers_investidos", INVESTIDOS_DEFAULT)
 
 with tab2:
-    # Top 5 fixo
     st.subheader("Top 5 mais recomendadas (fixas) — Nasdaq-100")
     top5 = stockanalysis_top5_strong_buy_nasdaq100()
     if not top5:
@@ -400,28 +543,31 @@ with tab2:
     else:
         df_top = build_df(top5)
         show_table(df_top, height=320)
-        st.caption("Fonte Top 5: StockAnalysis (Top Strong Buy) filtrado para Nasdaq-100.")
+        st.caption("Top 5: StockAnalysis (Top Strong Buy) filtrado para Nasdaq-100. Targets seguem prioridade Yahoo → MarketBeat → StockAnalysis.")
 
     st.divider()
-
-    # Lista editável do usuário (continua editável!)
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
 
 with tab3:
-    st.subheader("Status das Fontes")
+    st.subheader("Status das Fontes (✅/❌)")
     st.write("Yahoo:", "✅" if yahoo_test() else "❌")
-    st.write("StockAnalysis (Targets):", "✅" if stockanalysis_test() else "❌")
-    st.write("StockAnalysis (Top 5):", "✅" if bool(stockanalysis_top5_strong_buy_nasdaq100()) else "❌")
+    st.write("MarketBeat:", "✅" if marketbeat_test() else "❌")
+    st.write("StockAnalysis:", "✅" if stockanalysis_test() else "❌")
 
     st.divider()
-    st.subheader("Teste Targets (StockAnalysis)")
-    t1 = st.text_input("Ticker teste Targets", "MSFT", key="diag_t_targets")
-    if st.button("Testar Targets", key="diag_btn_targets"):
-        st.write(stockanalysis_targets(t1))
+    st.subheader("Teste rápido (um ticker)")
 
-    st.divider()
-    st.subheader("Teste Yahoo (info completo)")
-    t2 = st.text_input("Ticker teste Yahoo", "NVDA", key="diag_t_yahoo")
-    if st.button("Testar Yahoo", key="diag_btn_yahoo"):
-        tk = yf.Ticker(t2)
-        st.write(tk.info)
+    t = st.text_input("Ticker para teste", "NVDA", key="diag_ticker_test")
+    if st.button("Rodar teste completo", key="diag_btn_test"):
+        t = normalize_ticker(t)
+        st.write("Yahoo (info):")
+        try:
+            st.write((yf.Ticker(t).info or {}).get("recommendationKey"), (yf.Ticker(t).info or {}).get("targetMeanPrice"))
+        except Exception as e:
+            st.write("erro:", e)
+
+        st.write("MarketBeat (targets/rating):")
+        st.write(marketbeat_targets_and_rating(t))
+
+        st.write("StockAnalysis (targets):")
+        st.write(stockanalysis_targets(t))
