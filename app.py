@@ -289,8 +289,11 @@ def fetch_history_for_chart(ticker: str, period: str = "6mo") -> pd.DataFrame:
     base = float(df["Close"].iloc[0])
     if base > 0:
         df["Desempenho Acumulado %"] = (df["Close"] / base - 1.0) * 100.0
+        # Índice normalizado ajuda a diferenciar visualmente do gráfico de preço.
+        df["Índice Base 100"] = (df["Close"] / base) * 100.0
     else:
         df["Desempenho Acumulado %"] = 0.0
+        df["Índice Base 100"] = 100.0
     return df
 
 
@@ -438,9 +441,21 @@ def show_ticker_chart(tickers: list[str], key_prefix: str):
         st.warning(f"Sem histórico para {selected} no período selecionado.")
         return
 
-    st.caption(f"{selected} | período: {period_label}")
+    st.caption(f"Ticker: {selected} | Período selecionado: {period_label}")
+
+    st.markdown("**1) Preço de fechamento (USD)**")
+    st.caption("Função: mostrar o valor nominal da ação dia a dia no período selecionado.")
     st.line_chart(df[["Close"]], use_container_width=True)
-    st.line_chart(df[["Desempenho Acumulado %"]], use_container_width=True)
+
+    st.markdown("**2) Índice Base 100 (desempenho relativo)**")
+    st.caption(
+        "Função: comparar evolução percentual sem confundir com preço. "
+        "Início do período = 100; acima de 100 indica alta acumulada."
+    )
+    st.line_chart(df[["Índice Base 100"]], use_container_width=True)
+
+    st.markdown("**3) Retorno diário (%)**")
+    st.caption("Função: exibir a variação percentual de cada pregão (volatilidade diária).")
     st.bar_chart(df[["Retorno Diário %"]].dropna(), use_container_width=True)
 
 
