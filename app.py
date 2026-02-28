@@ -8,7 +8,7 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 # ----------------- CONFIG -----------------
-INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA"]
+INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA","AEHL"]
 EM_ANALISE_DEFAULT = []
 
 WINDOWS = {
