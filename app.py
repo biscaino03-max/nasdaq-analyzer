@@ -54,7 +54,27 @@ ANALYST_SCORE = {
 TTL_SECONDS = 300  # tabela e gráfico: 5 min
 TTL_LONG_SECONDS = 6 * 3600  # Top5/Nasdaq100: 6h
 
-STORE_FILE = "tickers_store.json"  # persistência sem banco
+
+def _resolve_store_file() -> str:
+    """
+    Define onde salvar o JSON de listas.
+    Prioridade:
+    1) variável TICKERS_STORE_FILE
+    2) /var/data/tickers_store.json (Render Disk, se existir)
+    3) arquivo local no diretório do app
+    """
+    env_path = os.getenv("TICKERS_STORE_FILE", "").strip()
+    if env_path:
+        return env_path
+
+    render_disk_dir = "/var/data"
+    if os.path.isdir(render_disk_dir):
+        return os.path.join(render_disk_dir, "tickers_store.json")
+
+    return "tickers_store.json"
+
+
+STORE_FILE = _resolve_store_file()  # persistência sem banco
 
 st.set_page_config(page_title="Nasdaq Analyzer (ao vivo)", layout="wide")
 st.title("Nasdaq Analyzer (ao vivo)")
@@ -73,8 +93,14 @@ def _safe_read_json(path: str):
 
 def _safe_write_json(path: str, data: dict):
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
         return True
     except Exception:
         return False
@@ -97,6 +123,23 @@ def save_lists_to_store(investidos: list[str], em_analise: list[str]):
     _safe_write_json(STORE_FILE, payload)
 
 
+def _migrate_legacy_store_if_needed():
+    """
+    Migra arquivo legado do diretório local para o caminho atual (ex.: /var/data)
+    sem sobrescrever se já existir destino.
+    """
+    legacy = "tickers_store.json"
+    if os.path.abspath(legacy) == os.path.abspath(STORE_FILE):
+        return
+    try:
+        if os.path.exists(legacy) and not os.path.exists(STORE_FILE):
+            data = _safe_read_json(legacy)
+            if isinstance(data, dict):
+                _safe_write_json(STORE_FILE, data)
+    except Exception:
+        pass
+
+
 # ----------------- STATE -----------------
 def normalize_ticker(t: str) -> str:
     t = (t or "").strip().upper()
@@ -108,6 +151,7 @@ if (
     "tickers_investidos" not in st.session_state
     or "tickers_em_analise" not in st.session_state
 ):
+    _migrate_legacy_store_if_needed()
     inv, ana = load_lists_from_store()
     st.session_state.tickers_investidos = inv
     st.session_state.tickers_em_analise = ana
@@ -568,3 +612,4 @@ with tab3:
     t = st.text_input("Ticker para teste", "NVDA", key="diag_ticker_test")
     if st.button("Rodar teste Yahoo", key="diag_btn_test"):
         st.write(fetch_one(normalize_ticker(t)))
+
