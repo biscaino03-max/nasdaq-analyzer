@@ -53,6 +53,8 @@ ANALYST_SCORE = {
 
 TTL_SECONDS = 300  # tabela e gráfico: 5 min
 TTL_LONG_SECONDS = 6 * 3600  # Top5/Nasdaq100: 6h
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 
 
 def _resolve_store_file() -> str:
@@ -212,6 +214,169 @@ def validate_and_fix_targets(low, mean, high):
     return lo2, mi2, hi2, False, "targets incoerentes (corrigidos)"
 
 
+def _append_alert(row: dict, message: str):
+    if not message:
+        return
+    row["Alerta"] = (row["Alerta"] + " | " if row["Alerta"] else "") + message
+
+
+def _merge_sources(*sources) -> str:
+    uniq = []
+    for s in sources:
+        if not s:
+            continue
+        if isinstance(s, (list, tuple)):
+            for item in s:
+                if item and item not in uniq:
+                    uniq.append(item)
+        elif s not in uniq:
+            uniq.append(s)
+    return " + ".join(uniq) if uniq else "—"
+
+
+def _build_base_row(ticker: str, closes: pd.Series, hist_source: str) -> dict:
+    last_close = float(closes.iloc[-1]) if closes is not None and not closes.empty else None
+    return {
+        "Ticker": ticker,
+        "1D": pct_change(closes, WINDOWS["1D"]) if closes is not None else None,
+        "1W": pct_change(closes, WINDOWS["1W"]) if closes is not None else None,
+        "2W": pct_change(closes, WINDOWS["2W"]) if closes is not None else None,
+        "3M": pct_change(closes, WINDOWS["3M"]) if closes is not None else None,
+        "6M": pct_change(closes, WINDOWS["6M"]) if closes is not None else None,
+        "1Y": pct_change(closes, WINDOWS["1Y"]) if closes is not None else None,
+        "Analistas_key": None,
+        "Analistas": "—",
+        "Preço": last_close,
+        "Target Min": None,
+        "Target Médio": None,
+        "Target Máx": None,
+        "Fonte": hist_source or "—",
+        "Alerta": "",
+        "Erro": "",
+    }
+
+
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def fetch_closes_yahoo(ticker: str, period: str = "13mo") -> pd.Series:
+    ticker = normalize_ticker(ticker)
+    hist = yf.Ticker(ticker).history(period=period, interval="1d")
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return pd.Series(dtype="float64")
+    closes = hist["Close"].dropna()
+    return closes if not closes.empty else pd.Series(dtype="float64")
+
+
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def fetch_closes_twelvedata(ticker: str, outputsize: int = 350) -> pd.Series:
+    if not TWELVE_DATA_API_KEY:
+        return pd.Series(dtype="float64")
+    try:
+        r = _http_get(
+            "https://api.twelvedata.com/time_series"
+            f"?symbol={normalize_ticker(ticker)}&interval=1day&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}",
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return pd.Series(dtype="float64")
+        payload = r.json()
+        values = payload.get("values", [])
+        if not isinstance(values, list) or not values:
+            return pd.Series(dtype="float64")
+        rows = []
+        for item in values:
+            dt_raw = item.get("datetime")
+            close_raw = _as_float(item.get("close"))
+            if not dt_raw or close_raw is None:
+                continue
+            rows.append((pd.to_datetime(dt_raw), close_raw))
+        if not rows:
+            return pd.Series(dtype="float64")
+        df = pd.DataFrame(rows, columns=["Date", "Close"]).sort_values("Date")
+        return df.set_index("Date")["Close"]
+    except Exception:
+        return pd.Series(dtype="float64")
+
+
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def fetch_finnhub_quote(ticker: str) -> dict:
+    if not FINNHUB_API_KEY:
+        return {}
+    try:
+        r = _http_get(
+            f"https://finnhub.io/api/v1/quote?symbol={normalize_ticker(ticker)}&token={FINNHUB_API_KEY}",
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return {}
+        payload = r.json()
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _finnhub_rec_to_key(rec_obj: dict):
+    if not isinstance(rec_obj, dict):
+        return None
+    counts = {
+        "strong_buy": int(rec_obj.get("strongBuy", 0) or 0),
+        "buy": int(rec_obj.get("buy", 0) or 0),
+        "hold": int(rec_obj.get("hold", 0) or 0),
+        "sell": int(rec_obj.get("sell", 0) or 0),
+        "strong_sell": int(rec_obj.get("strongSell", 0) or 0),
+    }
+    best_key, best_value = None, -1
+    for k in ["strong_buy", "buy", "hold", "sell", "strong_sell"]:
+        if counts[k] > best_value:
+            best_key, best_value = k, counts[k]
+    return best_key if best_value > 0 else None
+
+
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def fetch_finnhub_enrichment(ticker: str) -> dict:
+    if not FINNHUB_API_KEY:
+        return {}
+    ticker = normalize_ticker(ticker)
+    out = {"analyst_key": None, "target_low": None, "target_mean": None, "target_high": None}
+    try:
+        rec_r = _http_get(
+            f"https://finnhub.io/api/v1/stock/recommendation?symbol={ticker}&token={FINNHUB_API_KEY}",
+            timeout=15,
+        )
+        if rec_r.status_code == 200:
+            rec_payload = rec_r.json()
+            if isinstance(rec_payload, list) and rec_payload:
+                out["analyst_key"] = _finnhub_rec_to_key(rec_payload[0])
+    except Exception:
+        pass
+
+    try:
+        target_r = _http_get(
+            f"https://finnhub.io/api/v1/stock/price-target?symbol={ticker}&token={FINNHUB_API_KEY}",
+            timeout=15,
+        )
+        if target_r.status_code == 200:
+            t_payload = target_r.json()
+            if isinstance(t_payload, dict):
+                out["target_low"] = t_payload.get("targetLow")
+                out["target_mean"] = t_payload.get("targetMean")
+                out["target_high"] = t_payload.get("targetHigh")
+    except Exception:
+        pass
+    return out
+
+
+def _pick_best_closes(ticker: str, period: str = "13mo"):
+    closes = fetch_closes_yahoo(ticker, period=period)
+    if closes is not None and not closes.empty:
+        return closes, "Yahoo"
+
+    closes = fetch_closes_twelvedata(ticker, outputsize=450)
+    if closes is not None and not closes.empty:
+        return closes, "TwelveData"
+
+    return pd.Series(dtype="float64"), None
+
+
 # ----------------- NASDAQ-100 (WIKIPEDIA) -----------------
 @st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
 def get_nasdaq100_wikipedia() -> list[str]:
@@ -260,74 +425,96 @@ def get_nasdaq100_wikipedia() -> list[str]:
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_one(ticker: str):
     ticker = normalize_ticker(ticker)
-    tk = yf.Ticker(ticker)
+    closes, hist_source = _pick_best_closes(ticker, period="13mo")
+    if closes is None or closes.empty:
+        quote = fetch_finnhub_quote(ticker)
+        price = _as_float(quote.get("c")) if quote else None
+        if price is None:
+            return {"Ticker": ticker, "Erro": "Sem dados (Yahoo/TwelveData/Finnhub)"}
+        row = _build_base_row(ticker, pd.Series([price]), "Finnhub")
+        _append_alert(row, "Sem histórico diário completo; exibindo preço atual de fallback.")
+    else:
+        row = _build_base_row(ticker, closes, hist_source)
+        if hist_source != "Yahoo":
+            _append_alert(row, f"Histórico via {hist_source} (fallback).")
 
-    hist = tk.history(period="13mo", interval="1d")
-    if hist is None or hist.empty:
-        return {"Ticker": ticker, "Erro": "Sem dados (Yahoo)"}
+    sources = [hist_source] if hist_source else []
 
-    closes = hist["Close"].dropna()
-    if closes.empty:
-        return {"Ticker": ticker, "Erro": "Sem closes (Yahoo)"}
-
-    last_close = float(closes.iloc[-1])
-
-    row = {
-        "Ticker": ticker,
-        "1D": pct_change(closes, WINDOWS["1D"]),
-        "1W": pct_change(closes, WINDOWS["1W"]),
-        "2W": pct_change(closes, WINDOWS["2W"]),
-        "3M": pct_change(closes, WINDOWS["3M"]),
-        "6M": pct_change(closes, WINDOWS["6M"]),
-        "1Y": pct_change(closes, WINDOWS["1Y"]),
-        "Analistas_key": None,
-        "Analistas": "—",
-        "Preço": last_close,
-        "Target Min": None,
-        "Target Médio": None,
-        "Target Máx": None,
-        "Fonte": "—",
-        "Alerta": "",
-        "Erro": "",
-    }
-
+    # Yahoo (analistas/targets) primeiro
     try:
-        info = tk.info or {}
+        info = yf.Ticker(ticker).info or {}
         rec = info.get("recommendationKey")
-        row["Analistas_key"] = rec
-        row["Analistas"] = pretty_analyst_label(rec)
-        row["Target Min"] = info.get("targetLowPrice")
-        row["Target Médio"] = info.get("targetMeanPrice")
-        row["Target Máx"] = info.get("targetHighPrice")
-        if row["Target Médio"] is not None:
-            row["Fonte"] = "Yahoo"
+        if rec:
+            row["Analistas_key"] = rec
+            row["Analistas"] = pretty_analyst_label(rec)
+            sources.append("Yahoo")
+        if row["Target Médio"] is None:
+            row["Target Min"] = info.get("targetLowPrice")
+            row["Target Médio"] = info.get("targetMeanPrice")
+            row["Target Máx"] = info.get("targetHighPrice")
+            if row["Target Médio"] is not None:
+                sources.append("Yahoo")
     except Exception:
         pass
+
+    # Finnhub como fallback de recomendação/targets/preço
+    if row["Analistas_key"] is None or row["Target Médio"] is None or row["Preço"] is None:
+        fin = fetch_finnhub_enrichment(ticker)
+        if row["Analistas_key"] is None and fin.get("analyst_key"):
+            row["Analistas_key"] = fin["analyst_key"]
+            row["Analistas"] = pretty_analyst_label(fin["analyst_key"])
+            sources.append("Finnhub")
+        if row["Target Médio"] is None:
+            row["Target Min"] = fin.get("target_low")
+            row["Target Médio"] = fin.get("target_mean")
+            row["Target Máx"] = fin.get("target_high")
+            if row["Target Médio"] is not None:
+                sources.append("Finnhub")
+        if row["Preço"] is None:
+            q = fetch_finnhub_quote(ticker)
+            price = _as_float(q.get("c")) if q else None
+            if price is not None:
+                row["Preço"] = price
+                sources.append("Finnhub")
 
     low, mean, high, ok, msg = validate_and_fix_targets(
         row["Target Min"], row["Target Médio"], row["Target Máx"]
     )
     row["Target Min"], row["Target Médio"], row["Target Máx"] = low, mean, high
     if ok is False:
-        row["Alerta"] = "⚠️ " + msg
+        _append_alert(row, "⚠️ " + msg)
 
     if row["Target Médio"] is None:
-        row["Alerta"] = (row["Alerta"] + " | " if row["Alerta"] else "") + "Sem targets (Yahoo)"
-        row["Fonte"] = "Yahoo"
+        _append_alert(row, "Sem targets (Yahoo/Finnhub).")
 
+    row["Fonte"] = _merge_sources(sources)
     return row
 
 
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_history_for_chart(ticker: str, period: str = "6mo") -> pd.DataFrame:
     ticker = normalize_ticker(ticker)
-    hist = yf.Ticker(ticker).history(period=period, interval="1d")
-    if hist is None or hist.empty:
+    closes, _source = _pick_best_closes(ticker, period=period)
+    if closes is None or closes.empty:
+        closes, _source = _pick_best_closes(ticker, period="13mo")
+    if closes is None or closes.empty:
         return pd.DataFrame()
 
-    df = hist[["Close"]].dropna().copy()
-    if df.empty:
-        return pd.DataFrame()
+    # Se vier fallback com janela maior, reduz para o período escolhido.
+    period_points = {
+        "1mo": 23,
+        "3mo": 70,
+        "6mo": 140,
+        "1y": 260,
+        "2y": 520,
+        "5y": 1300,
+        "max": None,
+    }
+    max_points = period_points.get(period)
+    if max_points:
+        closes = closes.tail(max_points)
+
+    df = closes.to_frame(name="Close").copy()
 
     df["Retorno Diário %"] = df["Close"].pct_change() * 100.0
     base = float(df["Close"].iloc[0])
@@ -451,8 +638,9 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
 
     st.dataframe(styler.format(fmt), use_container_width=True, height=height)
     st.caption(
-        "Dados via Yahoo (yfinance). Cache TTL 5 min + botão manual. "
-        "Top 5: Nasdaq-100 (Wikipedia) + ranking Yahoo."
+        "Dados com fallback: Yahoo -> TwelveData (preço/histórico) "
+        "e Yahoo/Finnhub (analistas/targets). Cache TTL 5 min + botão manual. "
+        "Top 5: Nasdaq-100 (Wikipedia) + ranking por recomendação."
     )
 
 
@@ -568,6 +756,20 @@ def yahoo_test():
         return False
 
 
+def finnhub_test():
+    if not FINNHUB_API_KEY:
+        return False
+    q = fetch_finnhub_quote("MSFT")
+    return bool(q and _as_float(q.get("c")) is not None)
+
+
+def twelvedata_test():
+    if not TWELVE_DATA_API_KEY:
+        return False
+    s = fetch_closes_twelvedata("MSFT", outputsize=50)
+    return s is not None and not s.empty
+
+
 def wiki_test():
     tickers = get_nasdaq100_wikipedia()
     return bool(tickers)
@@ -597,6 +799,8 @@ with tab2:
 with tab3:
     st.header("Diagnóstico")
     st.write("Yahoo:", "✅" if yahoo_test() else "❌")
+    st.write("Finnhub:", "✅" if finnhub_test() else "❌")
+    st.write("Twelve Data:", "✅" if twelvedata_test() else "❌")
     st.write("Nasdaq-100 (Wikipedia):", "✅" if wiki_test() else "❌")
 
     st.divider()
@@ -612,4 +816,3 @@ with tab3:
     t = st.text_input("Ticker para teste", "NVDA", key="diag_ticker_test")
     if st.button("Rodar teste Yahoo", key="diag_btn_test"):
         st.write(fetch_one(normalize_ticker(t)))
-
