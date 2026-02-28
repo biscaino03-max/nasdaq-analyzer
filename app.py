@@ -775,6 +775,41 @@ def wiki_test():
     return bool(tickers)
 
 
+def quick_source_test(ticker: str) -> dict:
+    t = normalize_ticker(ticker)
+    if not t:
+        return {"erro": "Ticker inválido."}
+
+    result = {"ticker": t}
+
+    # Yahoo
+    yahoo_closes = fetch_closes_yahoo(t, period="1mo")
+    result["yahoo_ok"] = yahoo_closes is not None and not yahoo_closes.empty
+    result["yahoo_last_close"] = (
+        round(float(yahoo_closes.iloc[-1]), 4) if result["yahoo_ok"] else None
+    )
+
+    # Finnhub
+    fin_q = fetch_finnhub_quote(t)
+    fin_price = _as_float(fin_q.get("c")) if isinstance(fin_q, dict) else None
+    result["finnhub_ok"] = fin_price is not None
+    result["finnhub_price"] = round(fin_price, 4) if fin_price is not None else None
+
+    # Twelve Data
+    td_closes = fetch_closes_twelvedata(t, outputsize=50)
+    result["twelve_ok"] = td_closes is not None and not td_closes.empty
+    result["twelve_last_close"] = (
+        round(float(td_closes.iloc[-1]), 4) if result["twelve_ok"] else None
+    )
+
+    # Nasdaq-100 (Wikipedia): testa disponibilidade da lista + presença do ticker
+    ndx_list = get_nasdaq100_wikipedia()
+    result["nasdaq_ok"] = bool(ndx_list)
+    result["ticker_in_nasdaq100"] = t.replace(".", "-") in ndx_list if ndx_list else False
+
+    return result
+
+
 # ----------------- TABS -----------------
 tab1, tab2, tab3 = st.tabs(["Investidos", "Em análise", "Diagnóstico"])
 
@@ -814,5 +849,30 @@ with tab3:
     st.divider()
     st.subheader("Teste rápido (um ticker)")
     t = st.text_input("Ticker para teste", "NVDA", key="diag_ticker_test")
-    if st.button("Rodar teste Yahoo", key="diag_btn_test"):
-        st.write(fetch_one(normalize_ticker(t)))
+    if st.button("Rodar teste completo", key="diag_btn_test_all"):
+        test = quick_source_test(t)
+        if "erro" in test:
+            st.error(test["erro"])
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.write("Yahoo:", "✅" if test["yahoo_ok"] else "❌")
+            with c2:
+                st.write("Finnhub:", "✅" if test["finnhub_ok"] else "❌")
+            with c3:
+                st.write("Twelve Data:", "✅" if test["twelve_ok"] else "❌")
+            with c4:
+                st.write("Nasdaq:", "✅" if test["nasdaq_ok"] else "❌")
+
+            st.write(
+                {
+                    "ticker": test["ticker"],
+                    "yahoo_last_close": test["yahoo_last_close"],
+                    "finnhub_price": test["finnhub_price"],
+                    "twelve_last_close": test["twelve_last_close"],
+                    "ticker_in_nasdaq100": test["ticker_in_nasdaq100"],
+                }
+            )
+
+            st.markdown("**Resposta agregada atual (tabela principal):**")
+            st.write(fetch_one(test["ticker"]))
