@@ -626,6 +626,7 @@ def top10_short_term_nasdaq100() -> pd.DataFrame:
                     "2W %": round(m2w * 100.0, 2),
                     "1D %": round(m1d * 100.0, 2),
                     "Analistas": r.get("Analistas", "—"),
+                    "Preço": round(float(price), 2) if price is not None else None,
                     "Fonte": r.get("Fonte", "—"),
                 }
             )
@@ -680,6 +681,7 @@ def top10_medium_term_nasdaq100() -> pd.DataFrame:
                     "6M %": round(m6m * 100.0, 2),
                     "1Y %": round(m1y * 100.0, 2),
                     "Analistas": r.get("Analistas", "—"),
+                    "Preço": round(float(price), 2) if price is not None else None,
                     "Fonte": r.get("Fonte", "—"),
                 }
             )
