@@ -8,7 +8,7 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 # ----------------- CONFIG -----------------
-INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA","AEHL"]
+INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA"]
 EM_ANALISE_DEFAULT = []
 
 WINDOWS = {
@@ -579,6 +579,119 @@ def top5_auto_nasdaq100_yahoo() -> list[str]:
     return [x[0] for x in rows[:5]]
 
 
+def _num_or_zero(v) -> float:
+    n = _as_float(v)
+    return n if n is not None else 0.0
+
+
+@st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
+def top10_short_term_nasdaq100() -> pd.DataFrame:
+    """
+    Curto prazo (2 a 8 semanas):
+    peso maior em momentum recente (1W/2W), com ajuste por analistas e upside.
+    """
+    tickers = get_nasdaq100_wikipedia()
+    if not tickers:
+        return pd.DataFrame()
+
+    rows = []
+    for t in tickers[:110]:
+        try:
+            r = fetch_one(t)
+            if not r or r.get("Erro"):
+                continue
+
+            m1d = _num_or_zero(r.get("1D"))
+            m1w = _num_or_zero(r.get("1W"))
+            m2w = _num_or_zero(r.get("2W"))
+            rec = ANALYST_SCORE.get(r.get("Analistas_key"), 0)
+
+            price = _as_float(r.get("Preço"))
+            tmean = _as_float(r.get("Target Médio"))
+            upside = (tmean - price) / price if (price and tmean and price > 0) else 0.0
+
+            score = (
+                (m1w * 100.0) * 0.45
+                + (m2w * 100.0) * 0.35
+                + (m1d * 100.0) * 0.10
+                + rec * 1.5
+                + upside * 100.0 * 0.10
+            )
+
+            rows.append(
+                {
+                    "Ticker": t,
+                    "Score Curto": round(score, 2),
+                    "1W %": round(m1w * 100.0, 2),
+                    "2W %": round(m2w * 100.0, 2),
+                    "1D %": round(m1d * 100.0, 2),
+                    "Analistas": r.get("Analistas", "—"),
+                    "Fonte": r.get("Fonte", "—"),
+                }
+            )
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("Score Curto", ascending=False)
+    return df.head(10).reset_index(drop=True)
+
+
+@st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
+def top10_medium_term_nasdaq100() -> pd.DataFrame:
+    """
+    Médio prazo (3 a 12 meses):
+    peso maior em 3M/6M/1Y, com ajuste por analistas e upside.
+    """
+    tickers = get_nasdaq100_wikipedia()
+    if not tickers:
+        return pd.DataFrame()
+
+    rows = []
+    for t in tickers[:110]:
+        try:
+            r = fetch_one(t)
+            if not r or r.get("Erro"):
+                continue
+
+            m3m = _num_or_zero(r.get("3M"))
+            m6m = _num_or_zero(r.get("6M"))
+            m1y = _num_or_zero(r.get("1Y"))
+            rec = ANALYST_SCORE.get(r.get("Analistas_key"), 0)
+
+            price = _as_float(r.get("Preço"))
+            tmean = _as_float(r.get("Target Médio"))
+            upside = (tmean - price) / price if (price and tmean and price > 0) else 0.0
+
+            score = (
+                (m3m * 100.0) * 0.30
+                + (m6m * 100.0) * 0.35
+                + (m1y * 100.0) * 0.25
+                + rec * 1.5
+                + upside * 100.0 * 0.10
+            )
+
+            rows.append(
+                {
+                    "Ticker": t,
+                    "Score Médio": round(score, 2),
+                    "3M %": round(m3m * 100.0, 2),
+                    "6M %": round(m6m * 100.0, 2),
+                    "1Y %": round(m1y * 100.0, 2),
+                    "Analistas": r.get("Analistas", "—"),
+                    "Fonte": r.get("Fonte", "—"),
+                }
+            )
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("Score Médio", ascending=False)
+    return df.head(10).reset_index(drop=True)
+
+
 # ----------------- STYLES (CORES) -----------------
 def _bg_for_return(v):
     if v is None or pd.isna(v):
@@ -642,6 +755,36 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
         "e Yahoo/Finnhub (analistas/targets). Cache TTL 5 min + botão manual. "
         "Top 5: Nasdaq-100 (Wikipedia) + ranking por recomendação."
     )
+
+
+def show_rank_table_colored(df_raw: pd.DataFrame, score_col: str, pct_cols: list[str], height=360):
+    if df_raw is None or df_raw.empty:
+        return
+
+    def _bg_for_score(v):
+        n = _as_float(v)
+        if n is None:
+            return ""
+        if n > 0:
+            return "background-color: rgba(0, 180, 0, 0.20);"
+        if n < 0:
+            return "background-color: rgba(220, 0, 0, 0.20);"
+        return "background-color: rgba(120, 120, 120, 0.10);"
+
+    styler = df_raw.style
+    if score_col in df_raw.columns:
+        styler = styler.applymap(_bg_for_score, subset=[score_col])
+
+    valid_pct_cols = [c for c in pct_cols if c in df_raw.columns]
+    for c in valid_pct_cols:
+        styler = styler.applymap(_bg_for_return, subset=[c])
+
+    fmt = {}
+    for c in [score_col] + valid_pct_cols:
+        if c in df_raw.columns:
+            fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+
+    st.dataframe(styler.format(fmt), use_container_width=True, height=height)
 
 
 def show_ticker_chart(tickers: list[str], key_prefix: str):
@@ -818,6 +961,7 @@ with tab1:
 
 with tab2:
     st.header("Top 5 mais recomendadas (automático) — Nasdaq-100")
+    st.caption("Critério do Top 5 atual: recomendação de analistas + upside de target médio.")
     top5 = top5_auto_nasdaq100_yahoo()
     if not top5:
         st.warning(
@@ -827,6 +971,40 @@ with tab2:
         st.write("Tickers:", ", ".join(top5))
         df_top = build_df(top5)
         show_table_colored(df_top, height=360)
+
+    st.divider()
+    st.subheader("Top 10 Curto Prazo (2 a 8 semanas) — Nasdaq-100")
+    st.caption(
+        "Critério: momentum recente (1W/2W/1D) com ajuste por recomendação de analistas e upside."
+    )
+    df_short = top10_short_term_nasdaq100()
+    if df_short.empty:
+        st.warning("Não consegui montar o Top 10 de curto prazo no momento.")
+    else:
+        show_rank_table_colored(
+            df_short,
+            score_col="Score Curto",
+            pct_cols=["1D %", "1W %", "2W %"],
+            height=360,
+        )
+        st.write("Tickers (curto):", ", ".join(df_short["Ticker"].tolist()))
+
+    st.divider()
+    st.subheader("Top 10 Médio Prazo (3 a 12 meses) — Nasdaq-100")
+    st.caption(
+        "Critério: tendência/momentum (3M/6M/1Y) com ajuste por recomendação de analistas e upside."
+    )
+    df_medium = top10_medium_term_nasdaq100()
+    if df_medium.empty:
+        st.warning("Não consegui montar o Top 10 de médio prazo no momento.")
+    else:
+        show_rank_table_colored(
+            df_medium,
+            score_col="Score Médio",
+            pct_cols=["3M %", "6M %", "1Y %"],
+            height=360,
+        )
+        st.write("Tickers (médio):", ", ".join(df_medium["Ticker"].tolist()))
 
     st.divider()
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
@@ -876,3 +1054,4 @@ with tab3:
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
+
