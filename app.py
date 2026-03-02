@@ -1096,9 +1096,14 @@ def _fetch_usd_brl_from_bcb() -> dict:
         # Ordena por timestamp para garantir último valor.
         values = sorted(values, key=lambda x: x.get("dataHoraCotacao", ""))
         last = values[-1]
-        last_price = _as_float(last.get("cotacaoVenda"))
-        if last_price is None:
+        last_sell = _as_float(last.get("cotacaoVenda"))
+        last_buy = _as_float(last.get("cotacaoCompra"))
+        if last_sell is None and last_buy is None:
             return {}
+        if last_sell is None:
+            last_sell = last_buy
+        if last_buy is None:
+            last_buy = last_sell
 
         prev_price = None
         if len(values) >= 2:
@@ -1106,11 +1111,12 @@ def _fetch_usd_brl_from_bcb() -> dict:
 
         delta_pct = None
         if prev_price and prev_price != 0:
-            delta_pct = float((last_price / prev_price - 1.0) * 100.0)
+            delta_pct = float((last_sell / prev_price - 1.0) * 100.0)
 
         ts = last.get("dataHoraCotacao")
         return {
-            "price": float(last_price),
+            "buy_price": float(last_buy),
+            "sell_price": float(last_sell),
             "delta_pct": delta_pct,
             "source": "Banco Central do Brasil (PTAX venda)",
             "timestamp": ts,
@@ -1121,7 +1127,8 @@ def _fetch_usd_brl_from_bcb() -> dict:
 
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_usd_brl_widget_data() -> dict:
-    price = None
+    buy_price = None
+    sell_price = None
     delta_pct = None
     analyst_key = None
     source = None
@@ -1130,7 +1137,8 @@ def fetch_usd_brl_widget_data() -> dict:
     # 1) Fonte preferencial: Banco Central do Brasil (PTAX)
     bcb = _fetch_usd_brl_from_bcb()
     if bcb:
-        price = bcb.get("price")
+        buy_price = bcb.get("buy_price")
+        sell_price = bcb.get("sell_price")
         delta_pct = bcb.get("delta_pct")
         source = bcb.get("source")
         timestamp = bcb.get("timestamp")
@@ -1141,10 +1149,11 @@ def fetch_usd_brl_widget_data() -> dict:
             if hist is not None and not hist.empty and "Close" in hist.columns:
                 closes = hist["Close"].dropna()
                 if len(closes) >= 1:
-                    price = float(closes.iloc[-1])
+                    sell_price = float(closes.iloc[-1])
+                    buy_price = sell_price
                 if len(closes) >= 2 and closes.iloc[-2] != 0:
                     delta_pct = float((closes.iloc[-1] / closes.iloc[-2] - 1.0) * 100.0)
-                source = "Yahoo Finance (fallback)"
+                source = "Yahoo Finance (fallback, sem book compra/venda)"
         except Exception:
             pass
 
@@ -1166,7 +1175,8 @@ def fetch_usd_brl_widget_data() -> dict:
         signal = "SEM CONSENSO"
 
     return {
-        "price": price,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
         "delta_pct": delta_pct,
         "analyst_key": analyst_key,
         "analyst_label": label,
@@ -1187,13 +1197,19 @@ def render_top_right_usd_widget():
             if st.button("Atualizar dólar", key="usd_refresh_btn"):
                 fetch_usd_brl_widget_data.clear()
                 st.rerun()
-            if data["price"] is None:
+            if data["buy_price"] is None and data["sell_price"] is None:
                 st.warning("Cotacao indisponivel no momento.")
                 return
             delta_txt = None
             if data["delta_pct"] is not None:
                 delta_txt = f"{data['delta_pct']:+.2f}%"
-            st.metric("Dolar americano", f"R$ {data['price']:.4f}", delta_txt)
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                if data["buy_price"] is not None:
+                    st.metric("USD Compra", f"R$ {data['buy_price']:.4f}", delta_txt)
+            with mc2:
+                if data["sell_price"] is not None:
+                    st.metric("USD Venda", f"R$ {data['sell_price']:.4f}", delta_txt)
             st.caption(
                 "Sinal por analistas (proxy UUP): "
                 f"{data['signal']} | {data['analyst_label']}"
