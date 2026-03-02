@@ -647,8 +647,9 @@ def top10_short_term_nasdaq100() -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("Score Curto", ascending=False)
-    return df.head(10).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("Score Curto", ascending=False).head(10).reset_index(drop=True)
+    ordered_cols = ["Ticker", "Score Curto", "1W %", "2W %", "1D %", "Analistas", "Preço", "Fonte"]
+    return df[[c for c in ordered_cols if c in df.columns]]
 
 
 @st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
@@ -702,8 +703,9 @@ def top10_medium_term_nasdaq100() -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("Score Médio", ascending=False)
-    return df.head(10).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("Score Médio", ascending=False).head(10).reset_index(drop=True)
+    ordered_cols = ["Ticker", "Score Médio", "3M %", "6M %", "1Y %", "Analistas", "Preço", "Fonte"]
+    return df[[c for c in ordered_cols if c in df.columns]]
 
 
 # ----------------- STYLES (CORES) -----------------
@@ -1147,4 +1149,3 @@ with tab3:
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
-
