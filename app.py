@@ -634,12 +634,14 @@ def top10_short_term_nasdaq100() -> pd.DataFrame:
                 {
                     "Ticker": t,
                     "Score Curto": round(score, 2),
-                    "1W %": round(m1w * 100.0, 2),
-                    "2W %": round(m2w * 100.0, 2),
-                    "1D %": round(m1d * 100.0, 2),
+                    "1D": round(m1d * 100.0, 2),
+                    "1W": round(m1w * 100.0, 2),
+                    "2W": round(m2w * 100.0, 2),
                     "Analistas": r.get("Analistas", "—"),
-                    "Preço": round(float(price), 2) if price is not None else None,
+                    "Preço (USD)": round(float(price), 2) if price is not None else None,
                     "Fonte": r.get("Fonte", "—"),
+                    "Alerta": r.get("Alerta", ""),
+                    "Erro": r.get("Erro", ""),
                 }
             )
         except Exception:
@@ -648,7 +650,18 @@ def top10_short_term_nasdaq100() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).sort_values("Score Curto", ascending=False).head(10).reset_index(drop=True)
-    ordered_cols = ["Ticker", "Score Curto", "1W %", "2W %", "1D %", "Analistas", "Preço", "Fonte"]
+    ordered_cols = [
+        "Ticker",
+        "Score Curto",
+        "1D",
+        "1W",
+        "2W",
+        "Analistas",
+        "Preço (USD)",
+        "Fonte",
+        "Alerta",
+        "Erro",
+    ]
     return df[[c for c in ordered_cols if c in df.columns]]
 
 
@@ -690,12 +703,14 @@ def top10_medium_term_nasdaq100() -> pd.DataFrame:
                 {
                     "Ticker": t,
                     "Score Médio": round(score, 2),
-                    "3M %": round(m3m * 100.0, 2),
-                    "6M %": round(m6m * 100.0, 2),
-                    "1Y %": round(m1y * 100.0, 2),
+                    "3M": round(m3m * 100.0, 2),
+                    "6M": round(m6m * 100.0, 2),
+                    "1Y": round(m1y * 100.0, 2),
                     "Analistas": r.get("Analistas", "—"),
-                    "Preço": round(float(price), 2) if price is not None else None,
+                    "Preço (USD)": round(float(price), 2) if price is not None else None,
                     "Fonte": r.get("Fonte", "—"),
+                    "Alerta": r.get("Alerta", ""),
+                    "Erro": r.get("Erro", ""),
                 }
             )
         except Exception:
@@ -704,7 +719,18 @@ def top10_medium_term_nasdaq100() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).sort_values("Score Médio", ascending=False).head(10).reset_index(drop=True)
-    ordered_cols = ["Ticker", "Score Médio", "3M %", "6M %", "1Y %", "Analistas", "Preço", "Fonte"]
+    ordered_cols = [
+        "Ticker",
+        "Score Médio",
+        "3M",
+        "6M",
+        "1Y",
+        "Analistas",
+        "Preço (USD)",
+        "Fonte",
+        "Alerta",
+        "Erro",
+    ]
     return df[[c for c in ordered_cols if c in df.columns]]
 
 
@@ -731,6 +757,14 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
         return
 
     df = df_raw.copy()
+    df = df.rename(
+        columns={
+            "Preço": "Preço (USD)",
+            "Target Min": "Target Min (USD)",
+            "Target Médio": "Target Médio (USD)",
+            "Target Máx": "Target Máx (USD)",
+        }
+    )
     final_cols = [
         "Ticker",
         "1D",
@@ -740,10 +774,10 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
         "6M",
         "1Y",
         "Analistas",
-        "Preço",
-        "Target Min",
-        "Target Médio",
-        "Target Máx",
+        "Preço (USD)",
+        "Target Min (USD)",
+        "Target Médio (USD)",
+        "Target Máx (USD)",
         "Fonte",
         "Alerta",
         "Erro",
@@ -759,9 +793,9 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
         if c in df.columns:
             fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{x*100:.2f}%"
-    if "Preço" in df.columns:
-        fmt["Preço"] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
-    for c in ["Target Min", "Target Médio", "Target Máx"]:
+    if "Preço (USD)" in df.columns:
+        fmt["Preço (USD)"] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+    for c in ["Target Min (USD)", "Target Médio (USD)", "Target Máx (USD)"]:
         if c in df.columns:
             fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
 
@@ -796,9 +830,12 @@ def show_rank_table_colored(df_raw: pd.DataFrame, score_col: str, pct_cols: list
         styler = styler.applymap(_bg_for_return, subset=[c])
 
     fmt = {}
-    for c in [score_col] + valid_pct_cols:
-        if c in df_raw.columns:
-            fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+    if score_col in df_raw.columns:
+        fmt[score_col] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
+    for c in valid_pct_cols:
+        fmt[c] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}%"
+    if "Preço (USD)" in df_raw.columns:
+        fmt["Preço (USD)"] = lambda x: "" if (x is None or pd.isna(x)) else f"{float(x):.2f}"
 
     st.dataframe(styler.format(fmt), use_container_width=True, height=height)
 
@@ -1066,7 +1103,7 @@ with tab2:
         show_rank_table_colored(
             df_short,
             score_col="Score Curto",
-            pct_cols=["1D %", "1W %", "2W %"],
+            pct_cols=["1D", "1W", "2W"],
             height=360,
         )
         st.write("Tickers (curto):", ", ".join(df_short["Ticker"].tolist()))
@@ -1083,7 +1120,7 @@ with tab2:
         show_rank_table_colored(
             df_medium,
             score_col="Score Médio",
-            pct_cols=["3M %", "6M %", "1Y %"],
+            pct_cols=["3M", "6M", "1Y"],
             height=360,
         )
         st.write("Tickers (médio):", ", ".join(df_medium["Ticker"].tolist()))
@@ -1146,6 +1183,9 @@ with tab3:
                     "ticker_in_nasdaq100": test["ticker_in_nasdaq100"],
                 }
             )
+
+            st.markdown("**Resposta agregada atual (tabela principal):**")
+            st.write(fetch_one(test["ticker"]))
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
