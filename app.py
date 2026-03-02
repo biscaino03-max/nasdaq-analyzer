@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import datetime as dt
 import requests
 import pandas as pd
 import streamlit as st
@@ -1064,23 +1065,88 @@ def quick_source_test(ticker: str) -> dict:
     return result
 
 
+def _bcb_date_str(d: dt.date) -> str:
+    # Formato exigido pelo endpoint OData do BCB: MM-DD-YYYY
+    return d.strftime("%m-%d-%Y")
+
+
+def _fetch_usd_brl_from_bcb() -> dict:
+    """
+    Busca cotação USD/BRL via PTAX do Banco Central do Brasil.
+    Retorna cotação de venda e variação contra o último pregão disponível.
+    """
+    try:
+        today = dt.date.today()
+        start = today - dt.timedelta(days=10)
+        url = (
+            "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/"
+            "CotacaoDolarPeriodo(dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)"
+            f"?@dataInicial='{_bcb_date_str(start)}'"
+            f"&@dataFinalCotacao='{_bcb_date_str(today)}'"
+            "&$top=100&$format=json"
+        )
+        r = _http_get(url, timeout=20)
+        if r.status_code != 200:
+            return {}
+        payload = r.json()
+        values = payload.get("value", [])
+        if not isinstance(values, list) or len(values) == 0:
+            return {}
+
+        # Ordena por timestamp para garantir último valor.
+        values = sorted(values, key=lambda x: x.get("dataHoraCotacao", ""))
+        last = values[-1]
+        last_price = _as_float(last.get("cotacaoVenda"))
+        if last_price is None:
+            return {}
+
+        prev_price = None
+        if len(values) >= 2:
+            prev_price = _as_float(values[-2].get("cotacaoVenda"))
+
+        delta_pct = None
+        if prev_price and prev_price != 0:
+            delta_pct = float((last_price / prev_price - 1.0) * 100.0)
+
+        ts = last.get("dataHoraCotacao")
+        return {
+            "price": float(last_price),
+            "delta_pct": delta_pct,
+            "source": "Banco Central do Brasil (PTAX venda)",
+            "timestamp": ts,
+        }
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
 def fetch_usd_brl_widget_data() -> dict:
     price = None
     delta_pct = None
     analyst_key = None
+    source = None
+    timestamp = None
 
-    # Cotacao USD/BRL
-    try:
-        hist = yf.Ticker("USDBRL=X").history(period="5d", interval="1d")
-        if hist is not None and not hist.empty and "Close" in hist.columns:
-            closes = hist["Close"].dropna()
-            if len(closes) >= 1:
-                price = float(closes.iloc[-1])
-            if len(closes) >= 2 and closes.iloc[-2] != 0:
-                delta_pct = float((closes.iloc[-1] / closes.iloc[-2] - 1.0) * 100.0)
-    except Exception:
-        pass
+    # 1) Fonte preferencial: Banco Central do Brasil (PTAX)
+    bcb = _fetch_usd_brl_from_bcb()
+    if bcb:
+        price = bcb.get("price")
+        delta_pct = bcb.get("delta_pct")
+        source = bcb.get("source")
+        timestamp = bcb.get("timestamp")
+    else:
+        # 2) Fallback: Yahoo
+        try:
+            hist = yf.Ticker("USDBRL=X").history(period="5d", interval="1d")
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                closes = hist["Close"].dropna()
+                if len(closes) >= 1:
+                    price = float(closes.iloc[-1])
+                if len(closes) >= 2 and closes.iloc[-2] != 0:
+                    delta_pct = float((closes.iloc[-1] / closes.iloc[-2] - 1.0) * 100.0)
+                source = "Yahoo Finance (fallback)"
+        except Exception:
+            pass
 
     # Recomendacao de analistas (proxy do dolar via ETF UUP)
     try:
@@ -1105,6 +1171,8 @@ def fetch_usd_brl_widget_data() -> dict:
         "analyst_key": analyst_key,
         "analyst_label": label,
         "signal": signal,
+        "source": source or "Indisponível",
+        "timestamp": timestamp,
     }
 
 
@@ -1116,6 +1184,9 @@ def render_top_right_usd_widget():
             st.write("")
         with c2:
             st.markdown("### USD/BRL")
+            if st.button("Atualizar dólar", key="usd_refresh_btn"):
+                fetch_usd_brl_widget_data.clear()
+                st.rerun()
             if data["price"] is None:
                 st.warning("Cotacao indisponivel no momento.")
                 return
@@ -1127,6 +1198,9 @@ def render_top_right_usd_widget():
                 "Sinal por analistas (proxy UUP): "
                 f"{data['signal']} | {data['analyst_label']}"
             )
+            st.caption(f"Fonte da cotação: {data['source']}")
+            if data.get("timestamp"):
+                st.caption(f"Última atualização da fonte: {data['timestamp']}")
 
 
 # ----------------- TABS -----------------
