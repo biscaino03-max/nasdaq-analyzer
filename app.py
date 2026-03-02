@@ -78,8 +78,19 @@ def _resolve_store_file() -> str:
 
 STORE_FILE = _resolve_store_file()  # persistência sem banco
 
+
+def _resolve_backup_store_file(path: str) -> str:
+    base, ext = os.path.splitext(path)
+    if not ext:
+        return f"{path}.backup.json"
+    return f"{base}.backup{ext}"
+
+
+BACKUP_STORE_FILE = _resolve_backup_store_file(STORE_FILE)
+
 st.set_page_config(page_title="Nasdaq Analyzer (ao vivo)", layout="wide")
 st.title("Nasdaq Analyzer (ao vivo)")
+top_right_placeholder = st.empty()
 
 
 # ----------------- PERSISTÊNCIA (SEM DB) -----------------
@@ -123,6 +134,7 @@ def save_lists_to_store(investidos: list[str], em_analise: list[str]):
         "em_analise": em_analise,
     }
     _safe_write_json(STORE_FILE, payload)
+    _safe_write_json(BACKUP_STORE_FILE, payload)
 
 
 def _migrate_legacy_store_if_needed():
@@ -955,7 +967,73 @@ def quick_source_test(ticker: str) -> dict:
     return result
 
 
+@st.cache_data(ttl=TTL_SECONDS, show_spinner=False)
+def fetch_usd_brl_widget_data() -> dict:
+    price = None
+    delta_pct = None
+    analyst_key = None
+
+    # Cotacao USD/BRL
+    try:
+        hist = yf.Ticker("USDBRL=X").history(period="5d", interval="1d")
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            closes = hist["Close"].dropna()
+            if len(closes) >= 1:
+                price = float(closes.iloc[-1])
+            if len(closes) >= 2 and closes.iloc[-2] != 0:
+                delta_pct = float((closes.iloc[-1] / closes.iloc[-2] - 1.0) * 100.0)
+    except Exception:
+        pass
+
+    # Recomendacao de analistas (proxy do dolar via ETF UUP)
+    try:
+        info = yf.Ticker("UUP").info or {}
+        analyst_key = info.get("recommendationKey")
+    except Exception:
+        analyst_key = None
+
+    label = pretty_analyst_label(analyst_key)
+    if analyst_key in ("strong_buy", "buy"):
+        signal = "COMPRA"
+    elif analyst_key in ("strong_sell", "sell"):
+        signal = "VENDA"
+    elif analyst_key == "hold":
+        signal = "NEUTRO"
+    else:
+        signal = "SEM CONSENSO"
+
+    return {
+        "price": price,
+        "delta_pct": delta_pct,
+        "analyst_key": analyst_key,
+        "analyst_label": label,
+        "signal": signal,
+    }
+
+
+def render_top_right_usd_widget():
+    data = fetch_usd_brl_widget_data()
+    with top_right_placeholder.container():
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.write("")
+        with c2:
+            st.markdown("### USD/BRL")
+            if data["price"] is None:
+                st.warning("Cotacao indisponivel no momento.")
+                return
+            delta_txt = None
+            if data["delta_pct"] is not None:
+                delta_txt = f"{data['delta_pct']:+.2f}%"
+            st.metric("Dolar americano", f"R$ {data['price']:.4f}", delta_txt)
+            st.caption(
+                "Sinal por analistas (proxy UUP): "
+                f"{data['signal']} | {data['analyst_label']}"
+            )
+
+
 # ----------------- TABS -----------------
+render_top_right_usd_widget()
 tab1, tab2, tab3 = st.tabs(["Investidos", "Em análise", "Diagnóstico"])
 
 with tab1:
@@ -1017,6 +1095,19 @@ with tab3:
     st.write("Finnhub:", "✅" if finnhub_test() else "❌")
     st.write("Twelve Data:", "✅" if twelvedata_test() else "❌")
     st.write("Nasdaq-100 (Wikipedia):", "✅" if wiki_test() else "❌")
+    st.divider()
+    st.subheader("Persistência de listas")
+    st.code(
+        "\n".join(
+            [
+                f"STORE_FILE: {STORE_FILE}",
+                f"STORE_FILE existe: {'sim' if os.path.exists(STORE_FILE) else 'não'}",
+                f"BACKUP_STORE_FILE: {BACKUP_STORE_FILE}",
+                f"BACKUP existe: {'sim' if os.path.exists(BACKUP_STORE_FILE) else 'não'}",
+            ]
+        ),
+        language="text",
+    )
 
     st.divider()
     st.subheader("Sobre a coluna 'Alerta'")
