@@ -177,6 +177,33 @@ def persist_now():
     )
 
 
+# Reordena um ticker em uma lista usando ações simples de UI.
+# Mantido em função separada para facilitar ajustes futuros na lógica.
+def move_ticker_order(items: list[str], ticker: str, direction: str) -> bool:
+    if not items or ticker not in items:
+        return False
+    idx = items.index(ticker)
+    new_idx = idx
+
+    if direction == "up":
+        new_idx = max(0, idx - 1)
+    elif direction == "down":
+        new_idx = min(len(items) - 1, idx + 1)
+    elif direction == "top":
+        new_idx = 0
+    elif direction == "bottom":
+        new_idx = len(items) - 1
+    else:
+        return False
+
+    if new_idx == idx:
+        return False
+
+    item = items.pop(idx)
+    items.insert(new_idx, item)
+    return True
+
+
 # ----------------- HELPERS -----------------
 def pct_change(closes: pd.Series, n: int):
     if closes is None or closes.empty or len(closes) <= n:
@@ -921,6 +948,37 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
 
     tickers = st.session_state[key_state]
     if tickers:
+        # Controles de reordenação manual da lista.
+        # A ordem da lista define a ordem das linhas da tabela.
+        st.markdown("**Ordem dos tickers (manual):**")
+        r1, r2, r3, r4, r5 = st.columns([2, 1, 1, 1, 1])
+        with r1:
+            selected_reorder = st.selectbox(
+                "Selecione para reordenar",
+                options=tickers,
+                key=f"{key_state}_reorder_select",
+            )
+        with r2:
+            if st.button("↑ Subir", key=f"{key_state}_move_up"):
+                if move_ticker_order(tickers, selected_reorder, "up"):
+                    persist_now()
+                    st.rerun()
+        with r3:
+            if st.button("↓ Descer", key=f"{key_state}_move_down"):
+                if move_ticker_order(tickers, selected_reorder, "down"):
+                    persist_now()
+                    st.rerun()
+        with r4:
+            if st.button("Topo", key=f"{key_state}_move_top"):
+                if move_ticker_order(tickers, selected_reorder, "top"):
+                    persist_now()
+                    st.rerun()
+        with r5:
+            if st.button("Base", key=f"{key_state}_move_bottom"):
+                if move_ticker_order(tickers, selected_reorder, "bottom"):
+                    persist_now()
+                    st.rerun()
+
         st.markdown("**Tickers atuais (clique ❌ para remover):**")
         cols = st.columns(min(len(tickers), 10))
         for i, t in enumerate(tickers):
@@ -1183,9 +1241,6 @@ with tab3:
                     "ticker_in_nasdaq100": test["ticker_in_nasdaq100"],
                 }
             )
-
-            st.markdown("**Resposta agregada atual (tabela principal):**")
-            st.write(fetch_one(test["ticker"]))
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
