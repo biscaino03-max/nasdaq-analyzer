@@ -763,6 +763,13 @@ def top10_medium_term_nasdaq100() -> pd.DataFrame:
 
 
 # ----------------- STYLES (CORES) -----------------
+def _styler_map(styler, func, subset):
+    """Compatibilidade entre pandas novos (map) e antigos (applymap)."""
+    if hasattr(styler, "map"):
+        return styler.map(func, subset=subset)
+    return styler.applymap(func, subset=subset)
+
+
 def _bg_for_return(v):
     if v is None or pd.isna(v):
         return ""
@@ -815,7 +822,7 @@ def show_table_colored(df_raw: pd.DataFrame, height=560):
     styler = df.style
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
         if c in df.columns:
-            styler = styler.applymap(_bg_for_return, subset=[c])
+            styler = _styler_map(styler, _bg_for_return, subset=[c])
 
     fmt = {}
     for c in ["1D", "1W", "2W", "3M", "6M", "1Y"]:
@@ -851,11 +858,11 @@ def show_rank_table_colored(df_raw: pd.DataFrame, score_col: str, pct_cols: list
 
     styler = df_raw.style
     if score_col in df_raw.columns:
-        styler = styler.applymap(_bg_for_score, subset=[score_col])
+        styler = _styler_map(styler, _bg_for_score, subset=[score_col])
 
     valid_pct_cols = [c for c in pct_cols if c in df_raw.columns]
     for c in valid_pct_cols:
-        styler = styler.applymap(_bg_for_return, subset=[c])
+        styler = _styler_map(styler, _bg_for_return, subset=[c])
 
     fmt = {}
     if score_col in df_raw.columns:
@@ -1334,3 +1341,4 @@ with tab3:
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
+
