@@ -421,10 +421,10 @@ def _pick_best_closes(ticker: str, period: str = "13mo"):
 @st.cache_data(ttl=TTL_LONG_SECONDS, show_spinner=False)
 def get_nasdaq100_wikipedia() -> list[str]:
     """
-    Pega tickers do Nasdaq-100 via Wikipedia.
-    Em geral, funciona melhor no Render do que StockAnalysis/MarketBeat.
+    Pega os componentes atuais do Nasdaq-100 na página dedicada da Wikipedia.
+    A lista deixou de ficar na página geral do índice em 2026.
     """
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    url = "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
     try:
         r = _http_get(url, timeout=15)
         if r.status_code != 200:
@@ -456,6 +456,12 @@ def get_nasdaq100_wikipedia() -> list[str]:
             tk = tk.replace(".", "-")
             if tk not in tickers:
                 tickers.append(tk)
+
+        # Não guarda em cache uma tabela errada ou parcialmente lida.
+        if len(tickers) < 90:
+            return []
+
+        # Pode haver mais de 100 símbolos por causa de classes de ações.
         return tickers[:120]
     except Exception:
         return []
@@ -1341,4 +1347,3 @@ with tab3:
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
-
