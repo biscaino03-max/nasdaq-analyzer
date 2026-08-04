@@ -1347,3 +1347,4 @@ with tab3:
 
             st.markdown("**Resposta agregada atual (tabela principal):**")
             st.write(fetch_one(test["ticker"]))
+
