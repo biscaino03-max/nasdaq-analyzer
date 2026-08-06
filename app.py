@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 # ----------------- CONFIG -----------------
 INVESTIDOS_DEFAULT = ["AMCI", "VMAR", "VITL", "UAL", "MSFT", "DIS", "GPCR", "NVDA"]
 EM_ANALISE_DEFAULT = []
+ETFS_DEFAULT = ["SPY", "QQQ", "VTI", "DIA", "IWM"]
 
 WINDOWS = {
     "1D": 1,
@@ -124,15 +125,20 @@ def load_lists_from_store():
     data = _safe_read_json(STORE_FILE) or {}
     inv = data.get("investidos", INVESTIDOS_DEFAULT.copy())
     ana = data.get("em_analise", EM_ANALISE_DEFAULT.copy())
+    etfs = data.get("etfs", ETFS_DEFAULT.copy())
     inv = [normalize_ticker(x) for x in inv if normalize_ticker(x)]
     ana = [normalize_ticker(x) for x in ana if normalize_ticker(x)]
-    return inv, ana
+    etfs = [normalize_ticker(x) for x in etfs if normalize_ticker(x)]
+    return inv, ana, etfs
 
 
-def save_lists_to_store(investidos: list[str], em_analise: list[str]):
+def save_lists_to_store(
+    investidos: list[str], em_analise: list[str], etfs: list[str]
+):
     payload = {
         "investidos": investidos,
         "em_analise": em_analise,
+        "etfs": etfs,
     }
     _safe_write_json(STORE_FILE, payload)
     _safe_write_json(BACKUP_STORE_FILE, payload)
@@ -165,16 +171,20 @@ def normalize_ticker(t: str) -> str:
 if (
     "tickers_investidos" not in st.session_state
     or "tickers_em_analise" not in st.session_state
+    or "tickers_etfs" not in st.session_state
 ):
     _migrate_legacy_store_if_needed()
-    inv, ana = load_lists_from_store()
+    inv, ana, etfs = load_lists_from_store()
     st.session_state.tickers_investidos = inv
     st.session_state.tickers_em_analise = ana
+    st.session_state.tickers_etfs = etfs
 
 
 def persist_now():
     save_lists_to_store(
-        st.session_state.tickers_investidos, st.session_state.tickers_em_analise
+        st.session_state.tickers_investidos,
+        st.session_state.tickers_em_analise,
+        st.session_state.tickers_etfs,
     )
 
 
@@ -881,7 +891,9 @@ def show_rank_table_colored(df_raw: pd.DataFrame, score_col: str, pct_cols: list
     st.dataframe(styler.format(fmt), use_container_width=True, height=height)
 
 
-def show_ticker_chart(tickers: list[str], key_prefix: str):
+def show_ticker_chart(
+    tickers: list[str], key_prefix: str, default_period_index: int = 2
+):
     st.subheader("Gráfico por ticker")
 
     tickers = [normalize_ticker(t) for t in (tickers or []) if normalize_ticker(t)]
@@ -900,7 +912,7 @@ def show_ticker_chart(tickers: list[str], key_prefix: str):
         period_label = st.selectbox(
             "Período",
             options=list(CHART_PERIODS.keys()),
-            index=2,
+            index=default_period_index,
             key=f"{key_prefix}_chart_period",
         )
 
@@ -913,7 +925,7 @@ def show_ticker_chart(tickers: list[str], key_prefix: str):
     st.caption(f"Ticker: {selected} | Período selecionado: {period_label}")
 
     st.markdown("**1) Preço de fechamento (USD)**")
-    st.caption("Função: mostrar o valor nominal da ação dia a dia no período selecionado.")
+    st.caption("Função: mostrar o valor nominal do ativo dia a dia no período selecionado.")
     st.line_chart(df[["Close"]], use_container_width=True)
 
     st.markdown("**2) Índice Base 100 (desempenho relativo)**")
@@ -929,7 +941,12 @@ def show_ticker_chart(tickers: list[str], key_prefix: str):
 
 
 # ----------------- MANAGER (IGUAL NAS DUAS ABAS) -----------------
-def ticker_manager(title: str, key_state: str, default_list: list[str]):
+def ticker_manager(
+    title: str,
+    key_state: str,
+    default_list: list[str],
+    chart_default_period_index: int = 2,
+):
     st.header(title)
 
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -1011,7 +1028,7 @@ def ticker_manager(title: str, key_state: str, default_list: list[str]):
     df_raw = build_df(tickers)
     show_table_colored(df_raw)
     st.divider()
-    show_ticker_chart(tickers, key_state)
+    show_ticker_chart(tickers, key_state, chart_default_period_index)
 
 
 # ----------------- DIAGNÓSTICO -----------------
@@ -1234,7 +1251,9 @@ def render_top_right_usd_widget():
 
 # ----------------- TABS -----------------
 render_top_right_usd_widget()
-tab1, tab2, tab3 = st.tabs(["Investidos", "Em análise", "Diagnóstico"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Investidos", "Em análise", "ETFs", "Diagnóstico"]
+)
 
 with tab1:
     ticker_manager("Investidos (editável)", "tickers_investidos", INVESTIDOS_DEFAULT)
@@ -1290,6 +1309,28 @@ with tab2:
     ticker_manager("Em análise (editável)", "tickers_em_analise", EM_ANALISE_DEFAULT)
 
 with tab3:
+    st.header("ETFs disponíveis para acompanhamento")
+    st.write(
+        "Nesta aba você pode acompanhar ETFs negociados nos Estados Unidos, "
+        "adicionar novos símbolos e consultar o histórico de cada fundo."
+    )
+    st.info(
+        "A disponibilidade de cada ETF deve ser confirmada diretamente na sua "
+        "conta internacional da XP. O aplicativo consulta dados de mercado, mas "
+        "não está conectado ao catálogo de produtos da corretora."
+    )
+    st.caption(
+        "Exemplos iniciais: SPY (S&P 500), QQQ (Nasdaq-100), VTI (mercado total "
+        "dos EUA), DIA (Dow Jones) e IWM (empresas de menor capitalização)."
+    )
+    ticker_manager(
+        "ETFs (editável)",
+        "tickers_etfs",
+        ETFS_DEFAULT,
+        chart_default_period_index=5,
+    )
+
+with tab4:
     st.header("Diagnóstico")
     st.write("Yahoo:", "✅" if yahoo_test() else "❌")
     st.write("Finnhub:", "✅" if finnhub_test() else "❌")
